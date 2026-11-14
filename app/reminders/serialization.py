@@ -20,6 +20,8 @@ def to_response(reminder: Reminder, timezone_name: str) -> ReminderResponse:
         schedule=to_user_timezone(reminder.schedule, timezone_name),
         is_recurring=reminder.is_recurring,
         recurrence_rule=reminder.recurrence_rule,
+        recurrence_frequency=reminder.recurrence_frequency,
+        recurrence_interval=reminder.recurrence_interval,
         status=reminder.status,
         occurrence=occurrence_response,
     )
