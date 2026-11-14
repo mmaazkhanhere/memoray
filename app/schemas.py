@@ -4,7 +4,7 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.models import OccurrenceStatus, ReminderStatus, UserStatus
+from app.models import OccurrenceStatus, RecurrenceFrequency, ReminderStatus, UserStatus
 
 
 class UserCreate(BaseModel):
@@ -32,6 +32,13 @@ class UserCreatedResponse(UserResponse):
 
 class AgentMessageRequest(BaseModel):
     message: str = Field(min_length=1)
+    conversation_id: uuid.UUID | None = None
+
+
+class AgentMessageResponse(BaseModel):
+    conversation_id: uuid.UUID
+    response: str
+    draft_status: str | None = None
 
 
 class ReminderCreate(BaseModel):
@@ -39,6 +46,8 @@ class ReminderCreate(BaseModel):
     schedule: datetime
     is_recurring: bool = False
     recurrence_rule: str | None = None
+    recurrence_frequency: RecurrenceFrequency | None = None
+    recurrence_interval: int = Field(default=1, ge=1, le=365)
 
     @field_validator("title")
     @classmethod
@@ -77,6 +86,8 @@ class ReminderResponse(BaseModel):
     schedule: datetime
     is_recurring: bool
     recurrence_rule: str | None
+    recurrence_frequency: RecurrenceFrequency | None
+    recurrence_interval: int
     status: ReminderStatus
     occurrence: OccurrenceResponse | None = None
 
