@@ -15,13 +15,14 @@ from app.reminders.errors import DuplicateReminderError, ReminderInPastError
 from app.reminders.service import ReminderService
 from app.schemas import (
     AgentMessageRequest,
+    AgentMessageResponse,
     ReminderCreate,
     ReminderQuery,
     ReminderResponse,
     UserCreatedResponse,
     UserCreate,
-    UserResponse,
 )
+from app.conversations.service import ConversationService
 from app.users.service import UserService
 from app.models import User
 
@@ -67,6 +68,8 @@ def create_reminder(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ReminderInPastError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.get("/users/{user_id}/reminders", response_model=list[ReminderResponse])
@@ -88,7 +91,7 @@ def list_reminders(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@app.post("/users/{user_id}/agent", response_model=dict[str, str])
+@app.post("/users/{user_id}/agent", response_model=AgentMessageResponse)
 def agent_message(
     user_id: uuid.UUID,
     request: AgentMessageRequest,
@@ -98,8 +101,17 @@ def agent_message(
     try:
         authorize_user(user_id, current_user)
         provider = GroqProvider(get_settings())
-        result = ReminderAgent(provider, ReminderService(db), UserService(db)).handle(user_id, request.message)
-        return {"response": result}
+        result = ReminderAgent(
+            provider,
+            ReminderService(db),
+            UserService(db),
+            ConversationService(db),
+        ).handle(user_id, request.message, request.conversation_id)
+        return {
+            "conversation_id": result.conversation_id,
+            "response": result.response,
+            "draft_status": result.draft_status,
+        }
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
