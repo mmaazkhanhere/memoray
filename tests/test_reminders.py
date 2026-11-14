@@ -1,8 +1,9 @@
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
-from app.models import OccurrenceStatus, ReminderStatus
+from app.models import OccurrenceStatus, RecurrenceFrequency, ReminderStatus
 from app.reminders.errors import DuplicateReminderError, ReminderInPastError
 from app.reminders.service import ReminderService
 from app.schemas import ReminderCreate, ReminderListStatus, ReminderQuery, UserCreate
@@ -44,4 +45,38 @@ def test_past_and_duplicate_reminders_are_rejected(db):
     service.create(user.id, ReminderCreate(title="Same task", schedule=schedule))
     with pytest.raises(DuplicateReminderError):
         service.create(user.id, ReminderCreate(title="same TASK", schedule=schedule))
+
+
+def test_recurring_reminder_advances_to_a_new_pending_occurrence(db):
+    user = UserService(db).create(UserCreate(name="A", timezone="UTC"))
+    service = ReminderService(db)
+    reminder = service.create(
+        user.id,
+        ReminderCreate(
+            title="Daily check",
+            schedule=datetime.now(timezone.utc) + timedelta(hours=1),
+            is_recurring=True,
+            recurrence_frequency=RecurrenceFrequency.daily,
+        ),
+    )
+    first_occurrence = reminder.occurrences[0]
+    updated = service.complete_occurrence(user.id, reminder.id, first_occurrence.id)
+    assert updated.status == ReminderStatus.active
+    assert len(updated.occurrences) == 2
+    assert updated.occurrences[-1].status == OccurrenceStatus.pending
+    assert updated.occurrences[-1].schedule > first_occurrence.schedule
+
+
+def test_recurring_start_today_after_time_has_passed_rolls_to_next_occurrence(db):
+    user = UserService(db).create(UserCreate(name="A", timezone="UTC"))
+    service = ReminderService(db)
+    local_now = datetime.now(ZoneInfo("UTC"))
+    reminder = service.create_from_local_parts(
+        user.id,
+        title="Take medicine",
+        schedule_date=local_now.date(),
+        schedule_time=(local_now - timedelta(hours=1)).time().replace(microsecond=0),
+        recurrence_frequency=RecurrenceFrequency.daily,
+    )
+    assert reminder.schedule.date() > local_now.date()
 
