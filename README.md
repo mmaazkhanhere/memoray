@@ -14,6 +14,10 @@ uv run uvicorn app.api:app --reload
 
 The agent exposes `POST /users/{user_id}/agent` and the underlying reminder operations are also available at `POST /users/{user_id}/reminders` and `GET /users/{user_id}/reminders`.
 
+Agent requests may include a `conversation_id`. If omitted, the response creates one. Reminder creation details are saved as a draft between turns until title, date, and time are complete. Recurring reminders additionally require `daily`, `weekly`, `monthly`, or `yearly` frequency.
+
+When one message contains multiple complete reminder requests, the agent uses a batch creation tool and returns one conversational response after processing each item.
+
 `POST /users` returns an `access_token`. Send it on reminder and agent requests as:
 
 ```text
