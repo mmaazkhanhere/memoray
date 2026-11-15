@@ -1,7 +1,7 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import User
+from app.models import DeliveryChannel, DeliveryDestination, User
 from app.schemas import UserCreate
 from app.time_utils import validate_timezone
 from app.core.auth import generate_access_token, hash_access_token
@@ -20,6 +20,14 @@ class UserService:
         access_token = generate_access_token()
         user = User(name=data.name.strip(), timezone=data.timezone, status=data.status)
         user.auth_token_hash = hash_access_token(access_token)
+        user.destinations.append(
+            DeliveryDestination(
+                channel=DeliveryChannel.in_app,
+                identity=f"pending:{access_token[:8]}",
+                is_linked=True,
+                is_valid=True,
+            )
+        )
         self.db.add(user)
         self.db.commit()
         self.db.refresh(user)

@@ -26,6 +26,13 @@ class OccurrenceStatus(str, enum.Enum):
     canceled = "canceled"
 
 
+class DeliveryChannel(str, enum.Enum):
+    in_app = "in_app"
+    email = "email"
+    sms = "sms"
+    webhook = "webhook"
+
+
 class RecurrenceFrequency(str, enum.Enum):
     daily = "daily"
     weekly = "weekly"
@@ -71,6 +78,31 @@ class User(Base):
     conversations: Mapped[list["ReminderConversation"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    destinations: Mapped[list["DeliveryDestination"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+
+
+class DeliveryDestination(Base):
+    __tablename__ = "delivery_destinations"
+    __table_args__ = (
+        Index("ix_destinations_user_channel", "user_id", "channel"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    channel: Mapped[DeliveryChannel] = mapped_column(
+        Enum(DeliveryChannel, name="delivery_channel"), nullable=False
+    )
+    identity: Mapped[str] = mapped_column(String(500), nullable=False)
+    is_linked: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_valid: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    user: Mapped[User] = relationship(back_populates="destinations")
 
 
 class Reminder(Base):
@@ -99,6 +131,10 @@ class Reminder(Base):
         Enum(RecurrenceFrequency, name="recurrence_frequency"), nullable=True
     )
     recurrence_interval: Mapped[int] = mapped_column(default=1, nullable=False)
+    destination_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("delivery_destinations.id", ondelete="SET NULL"), nullable=True
+    )
+    series_anchor_schedule: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[ReminderStatus] = mapped_column(
         Enum(ReminderStatus, name="reminder_status"), default=ReminderStatus.active, nullable=False
     )
@@ -107,6 +143,7 @@ class Reminder(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
     user: Mapped[User] = relationship(back_populates="reminders")
+    destination: Mapped[DeliveryDestination | None] = relationship()
     occurrences: Mapped[list["ReminderOccurrence"]] = relationship(
         back_populates="reminder", cascade="all, delete-orphan", order_by="ReminderOccurrence.schedule"
     )
@@ -128,6 +165,7 @@ class ReminderOccurrence(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
     reminder: Mapped[Reminder] = relationship(back_populates="occurrences")
+    series_schedule: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ReminderConversation(Base):
