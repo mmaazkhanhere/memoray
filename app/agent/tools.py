@@ -176,6 +176,29 @@ RESCHEDULE_REMINDER_TOOL = {
     },
 }
 
+CANCEL_REMINDER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "cancel_reminder",
+        "description": (
+            "Mutation only: cancel an already-resolved reminder. The exact reminder_id is required; "
+            "never use this tool to search by title. Use one_time for a non-recurring reminder, "
+            "occurrence for one pending recurring occurrence with its exact occurrence_id, and "
+            "series only when the user explicitly wants the entire recurring series stopped."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reminder_id": {"type": "string", "format": "uuid"},
+                "occurrence_id": _optional_string("uuid"),
+                "scope": {"type": "string", "enum": ["one_time", "occurrence", "series"]},
+            },
+            "required": ["reminder_id", "scope"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 SNOOZE_OCCURRENCE_TOOL = {
     "type": "function",
     "function": {
@@ -201,6 +224,7 @@ TOOLS = [
     CREATE_REMINDERS_TOOL,
     LIST_REMINDERS_TOOL,
     RESCHEDULE_REMINDER_TOOL,
+    CANCEL_REMINDER_TOOL,
     SNOOZE_OCCURRENCE_TOOL,
 ]
 

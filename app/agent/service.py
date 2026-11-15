@@ -3,7 +3,6 @@ import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
@@ -11,16 +10,25 @@ from app.agent.tools import TOOLS
 from app.conversations.service import ConversationService
 from app.llm.protocol import LLMProvider
 from app.models import ConversationMessageRole, DraftStatus, RecurrenceFrequency
+from app.reminders.canceling import ReminderCanceler
 from app.reminders.errors import DuplicateReminderError, ReminderInPastError
 from app.reminders.rescheduling import ReminderRescheduler
 from app.reminders.snoozing import ReminderSnoozer
 from app.reminders.serialization import to_response
 from app.reminders.service import ReminderService
-from app.schemas import ReminderCreate, ReminderQuery, ReminderRescheduleRequest, RescheduleScope, SnoozeRequest
+from app.schemas import (
+    CancellationScope,
+    ReminderCancelRequest,
+    ReminderCreate,
+    ReminderQuery,
+    ReminderRescheduleRequest,
+    RescheduleScope,
+    SnoozeRequest,
+)
 from app.time_utils import to_user_timezone
 from app.users.service import UserService
 
-SYSTEM_PROMPT = """You are Memoray, a reminder assistant. You can create, list, reschedule, and snooze reminders.
+SYSTEM_PROMPT = """You are Memoray, a reminder assistant. You can create, list, reschedule, cancel, and snooze reminders.
 
 Creation: collect title, date, and time; recurring reminders also need frequency (daily, weekly,
 monthly, or yearly) and may use an interval (for example, every 3 days = daily, interval 3).
@@ -37,6 +45,14 @@ include that pending occurrence's exact occurrence_id; use scope=series only whe
 changes the recurring schedule. Ask for clarification if the requested scope or occurrence is
 ambiguous. Call reschedule_reminder once after discovery and do not verify it with another tool call.
 Rescheduling uses a future time. Snoozing requires one delivered occurrence and a positive duration.
+
+Cancellation: cancel_reminder is mutation-only and requires an exact reminder_id discovered with
+list_reminders first. Use scope=one_time for one non-recurring reminder, scope=occurrence with the
+exact pending occurrence_id to skip one occurrence while keeping the recurring series active, and
+scope=series only when the user explicitly wants the entire recurring series stopped. Search first
+with the most relevant title and status=pending, then make at most one broader listing without a
+title if needed. Never mutate when multiple reminders match, when the requested scope is ambiguous,
+or when no suitable reminder exists; ask the user to clarify or report that none was found.
 
 For unrelated requests, explain that you manage reminders only. After a successful tool result, reply
 warmly and concisely in 25 words or fewer, using only that result.
@@ -97,6 +113,7 @@ class ReminderAgent:
         last_tool_results: list[dict[str, Any]] = []
         working_messages = messages
         reschedule_workflow = self._looks_like_reschedule_request(message)
+        cancellation_workflow = self._looks_like_cancellation_request(message)
         discovery_calls = 0
         mutation_attempted = False
         last_discovery_result: dict[str, Any] | None = None
@@ -109,7 +126,10 @@ class ReminderAgent:
             for call in response.tool_calls:
                 if call.name == "reschedule_reminder":
                     reschedule_workflow = True
-                if call.name == "list_reminders" and reschedule_workflow:
+                if call.name == "cancel_reminder":
+                    cancellation_workflow = True
+                mutation_workflow = reschedule_workflow or cancellation_workflow
+                if call.name == "list_reminders" and mutation_workflow:
                     discovery_calls += 1
                     if discovery_calls > 2:
                         last_tool_results.append(
@@ -127,16 +147,25 @@ class ReminderAgent:
                             }
                         )
                         continue
-                if call.name == "reschedule_reminder":
+                if call.name in {"reschedule_reminder", "cancel_reminder"}:
                     if mutation_attempted:
                         last_tool_results.append(
                             {
                                 "operation": "rejected",
-                                "error": "Rescheduling was already attempted; do not retry the mutation.",
+                                "error": "A reminder mutation was already attempted; do not retry it.",
                             }
                         )
                         continue
-                    if reschedule_workflow and last_discovery_result is not None:
+                    if call.name == "cancel_reminder" and last_discovery_result is None:
+                        last_tool_results.append(
+                            {
+                                "operation": "discovery_required",
+                                "error": "Use list_reminders before mutating a reminder.",
+                            }
+                        )
+                        mutation_attempted = True
+                        continue
+                    if mutation_workflow and last_discovery_result is not None:
                         candidates = last_discovery_result.get("reminders", [])
                         reminder_id = call.arguments.get("reminder_id")
                         if len(candidates) != 1:
@@ -160,10 +189,22 @@ class ReminderAgent:
                             )
                             mutation_attempted = True
                             continue
+                        if call.name == "cancel_reminder" and call.arguments.get("scope") == "occurrence":
+                            occurrence_id = call.arguments.get("occurrence_id")
+                            discovered_occurrence = (candidates[0].get("occurrence") or {}).get("id")
+                            if not occurrence_id or occurrence_id != discovered_occurrence:
+                                last_tool_results.append(
+                                    {
+                                        "operation": "target_not_discovered",
+                                        "error": "Use the occurrence_id returned by list_reminders for the requested occurrence.",
+                                    }
+                                )
+                                mutation_attempted = True
+                                continue
                     mutation_attempted = True
                 result = self._execute_tool(user_id, conversation, call)
                 last_tool_results.append(result)
-                if call.name == "list_reminders" and reschedule_workflow:
+                if call.name == "list_reminders" and mutation_workflow:
                     last_discovery_result = result
             final_context = {
                 "role": "user",
@@ -175,8 +216,8 @@ class ReminderAgent:
             }
             working_messages = working_messages + [final_context]
 
-            if reschedule_workflow and any(call.name == "list_reminders" for call in response.tool_calls) and not any(
-                call.name == "reschedule_reminder" for call in response.tool_calls
+            if mutation_workflow and any(call.name == "list_reminders" for call in response.tool_calls) and not any(
+                call.name in {"reschedule_reminder", "cancel_reminder"} for call in response.tool_calls
             ):
                 discovery_result = last_discovery_result or {}
                 if discovery_result.get("count") == 1 or (
@@ -224,6 +265,8 @@ class ReminderAgent:
             return self._list(user_id, call.arguments)
         if call.name == "reschedule_reminder":
             return self._reschedule(user_id, call.arguments)
+        if call.name == "cancel_reminder":
+            return self._cancel(user_id, call.arguments)
         if call.name == "snooze_occurrence":
             return self._snooze(user_id, call.arguments)
         return {"operation": "rejected", "error": "unsupported reminder operation"}
@@ -296,6 +339,41 @@ class ReminderAgent:
     def _looks_like_reschedule_request(message: str) -> bool:
         words = message.casefold()
         return any(term in words for term in ("reschedule", "move my", "move the", "postpone", "push back", "shift"))
+
+    @staticmethod
+    def _looks_like_cancellation_request(message: str) -> bool:
+        words = message.casefold()
+        return any(
+            term in words
+            for term in ("cancel", "cancellation", "delete", "deletion", "stop", "skip")
+        )
+
+    def _cancel(self, user_id: uuid.UUID, arguments: dict[str, Any]) -> dict[str, Any]:
+        try:
+            reminder_id = arguments.get("reminder_id")
+            scope = arguments.get("scope")
+            if not reminder_id or not scope:
+                return {
+                    "operation": "discovery_required",
+                    "error": "An exact reminder_id and cancellation scope are required; use list_reminders for discovery.",
+                }
+            request = ReminderCancelRequest(
+                scope=CancellationScope(scope),
+                occurrence_id=uuid.UUID(arguments["occurrence_id"])
+                if arguments.get("occurrence_id")
+                else None,
+            )
+            reminder = ReminderCanceler(self.reminders.db).cancel(
+                user_id, uuid.UUID(reminder_id), request
+            )
+        except (KeyError, TypeError, ValueError, ValidationError, LookupError) as exc:
+            return {"operation": "not_canceled", "error": str(exc)}
+        user = self.users.get(user_id)
+        return {
+            "operation": "canceled",
+            "scope": request.scope.value,
+            "reminder": to_response(reminder, user.timezone).model_dump(mode="json"),
+        }
 
     def _snooze(self, user_id: uuid.UUID, arguments: dict[str, Any]) -> dict[str, Any]:
         try:
