@@ -102,6 +102,17 @@ class ReminderRescheduleRequest(BaseModel):
     destination_id: uuid.UUID | None = None
 
 
+class CancellationScope(str, Enum):
+    one_time = "one_time"
+    occurrence = "occurrence"
+    series = "series"
+
+
+class ReminderCancelRequest(BaseModel):
+    scope: CancellationScope
+    occurrence_id: uuid.UUID | None = None
+
+
 class SnoozeRequest(BaseModel):
     duration_seconds: int = Field(gt=0)
 

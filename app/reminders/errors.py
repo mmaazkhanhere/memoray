@@ -14,6 +14,10 @@ class OccurrenceNotPendingError(ValueError):
     """A reschedule target is not an editable future occurrence."""
 
 
+class OccurrenceNotCancelableError(ValueError):
+    """A cancellation target is not a pending occurrence."""
+
+
 class OccurrenceNotNotifiedError(ValueError):
     """A snooze target has not been delivered."""
 
