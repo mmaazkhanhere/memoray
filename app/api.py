@@ -13,12 +13,19 @@ from app.llm.groq_provider import GroqProvider
 from app.reminders.serialization import to_response
 from app.reminders.errors import DuplicateReminderError, ReminderInPastError
 from app.reminders.service import ReminderService
+from app.reminders.destinations import DestinationService
+from app.reminders.rescheduling import ReminderRescheduler
+from app.reminders.snoozing import ReminderSnoozer
 from app.schemas import (
     AgentMessageRequest,
     AgentMessageResponse,
     ReminderCreate,
+    DeliveryDestinationCreate,
+    DeliveryDestinationResponse,
+    ReminderRescheduleRequest,
     ReminderQuery,
     ReminderResponse,
+    SnoozeRequest,
     UserCreatedResponse,
     UserCreate,
 )
@@ -78,17 +85,89 @@ def list_reminders(
     title: str | None = Query(default=None),
     start: datetime | None = Query(default=None),
     end: datetime | None = Query(default=None),
+    occurrence_start: datetime | None = Query(default=None),
+    occurrence_end: datetime | None = Query(default=None),
     status: str | None = Query(default=None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     try:
         authorize_user(user_id, current_user)
-        query = ReminderQuery(title=title, start=start, end=end, status=status)
+        query = ReminderQuery(
+            title=title,
+            start=start,
+            end=end,
+            occurrence_start=occurrence_start,
+            occurrence_end=occurrence_end,
+            status=status,
+        )
         user = UserService(db).get(user_id)
-        return [to_response(item, user.timezone) for item in ReminderService(db).list(user_id, query)]
+        return [
+            to_response(item, user.timezone, occurrence)
+            for item, occurrence in ReminderService(db).list_with_occurrences(user_id, query)
+        ]
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/users/{user_id}/destinations", response_model=DeliveryDestinationResponse, status_code=201)
+def create_destination(
+    user_id: uuid.UUID,
+    data: DeliveryDestinationCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    try:
+        authorize_user(user_id, current_user)
+        return DestinationService(db).create(user_id, data)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/users/{user_id}/reminders/{reminder_id}/reschedule", response_model=ReminderResponse)
+def reschedule_reminder(
+    user_id: uuid.UUID,
+    reminder_id: uuid.UUID,
+    data: ReminderRescheduleRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    try:
+        authorize_user(user_id, current_user)
+        reminder = ReminderRescheduler(db).reschedule(user_id, reminder_id, data)
+        user = UserService(db).get(user_id)
+        return to_response(reminder, user.timezone)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ReminderInPastError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post(
+    "/users/{user_id}/reminders/{reminder_id}/occurrences/{occurrence_id}/snooze",
+    response_model=ReminderResponse,
+)
+def snooze_occurrence(
+    user_id: uuid.UUID,
+    reminder_id: uuid.UUID,
+    occurrence_id: uuid.UUID,
+    data: SnoozeRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    try:
+        authorize_user(user_id, current_user)
+        reminder = ReminderSnoozer(db).snooze(user_id, reminder_id, occurrence_id, data)
+        user = UserService(db).get(user_id)
+        return to_response(reminder, user.timezone)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/users/{user_id}/agent", response_model=AgentMessageResponse)

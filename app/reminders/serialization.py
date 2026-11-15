@@ -3,8 +3,11 @@ from app.schemas import OccurrenceResponse, ReminderResponse
 from app.time_utils import to_user_timezone
 
 
-def to_response(reminder: Reminder, timezone_name: str) -> ReminderResponse:
-    occurrence = reminder.occurrences[-1] if reminder.occurrences else None
+def to_response(
+    reminder: Reminder, timezone_name: str, occurrence=None
+) -> ReminderResponse:
+    if occurrence is None and reminder.occurrences:
+        occurrence = reminder.occurrences[-1]
     occurrence_response = None
     if occurrence:
         occurrence_response = OccurrenceResponse(
@@ -22,6 +25,7 @@ def to_response(reminder: Reminder, timezone_name: str) -> ReminderResponse:
         recurrence_rule=reminder.recurrence_rule,
         recurrence_frequency=reminder.recurrence_frequency,
         recurrence_interval=reminder.recurrence_interval,
+        destination_id=reminder.destination_id,
         status=reminder.status,
         occurrence=occurrence_response,
     )
