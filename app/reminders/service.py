@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import uuid
 from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo
@@ -14,6 +16,7 @@ from app.models import (
     ReminderStatus,
 )
 from app.reminders.errors import DuplicateReminderError, ReminderInPastError
+from app.reminders.occurrences import advance_recurring_occurrence
 from app.reminders.destinations import DestinationService
 from app.recurrence.schedule import next_occurrence
 from app.schemas import ReminderCreate, ReminderListStatus, ReminderQuery
@@ -134,25 +137,8 @@ class ReminderService:
 
         occurrence.status = OccurrenceStatus.completed
         if reminder.is_recurring and reminder.recurrence_frequency:
-            nominal_schedule = occurrence.series_schedule or occurrence.schedule
-            local_schedule = to_user_timezone(nominal_schedule, user.timezone)
-            next_local = next_occurrence(
-                local_schedule, reminder.recurrence_frequency, reminder.recurrence_interval
-            )
-            while to_utc(next_local, user.timezone) <= datetime.now(timezone.utc):
-                next_local = next_occurrence(
-                    next_local, reminder.recurrence_frequency, reminder.recurrence_interval
-                )
-            next_schedule = to_utc(next_local, user.timezone)
-            reminder.schedule = next_schedule
-            reminder.occurrences.append(
-                ReminderOccurrence(
-                    schedule=next_schedule,
-                    next_due_at=next_schedule,
-                    series_schedule=next_schedule,
-                    status=OccurrenceStatus.pending,
-                )
-            )
+            next_record = advance_recurring_occurrence(reminder, occurrence, user.timezone)
+            reminder.schedule = next_record.schedule
         else:
             reminder.status = ReminderStatus.completed
         self.db.commit()
