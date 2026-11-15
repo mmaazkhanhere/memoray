@@ -14,12 +14,14 @@ from app.reminders.serialization import to_response
 from app.reminders.errors import DuplicateReminderError, ReminderInPastError
 from app.reminders.service import ReminderService
 from app.reminders.destinations import DestinationService
+from app.reminders.canceling import ReminderCanceler
 from app.reminders.rescheduling import ReminderRescheduler
 from app.reminders.snoozing import ReminderSnoozer
 from app.schemas import (
     AgentMessageRequest,
     AgentMessageResponse,
     ReminderCreate,
+    ReminderCancelRequest,
     DeliveryDestinationCreate,
     DeliveryDestinationResponse,
     ReminderRescheduleRequest,
@@ -143,6 +145,25 @@ def reschedule_reminder(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ReminderInPastError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/users/{user_id}/reminders/{reminder_id}/cancel", response_model=ReminderResponse)
+def cancel_reminder(
+    user_id: uuid.UUID,
+    reminder_id: uuid.UUID,
+    data: ReminderCancelRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    try:
+        authorize_user(user_id, current_user)
+        reminder = ReminderCanceler(db).cancel(user_id, reminder_id, data)
+        user = UserService(db).get(user_id)
+        return to_response(reminder, user.timezone)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
