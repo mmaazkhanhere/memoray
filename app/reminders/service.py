@@ -150,6 +150,11 @@ class ReminderService:
 
         return ReminderRescheduler(self.db).reschedule(user_id, reminder_id, request)
 
+    def cancel(self, user_id: uuid.UUID, reminder_id: uuid.UUID, request):
+        from app.reminders.canceling import ReminderCanceler
+
+        return ReminderCanceler(self.db).cancel(user_id, reminder_id, request)
+
     def snooze(
         self,
         user_id: uuid.UUID,
