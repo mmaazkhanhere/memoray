@@ -1,9 +1,11 @@
+from datetime import datetime, timedelta, timezone
+
 from app.llm.protocol import LLMResponse, ToolCall
 from app.agent.service import ReminderAgent
-from app.agent.tools import LIST_REMINDERS_TOOL
+from app.agent.tools import LIST_REMINDERS_TOOL, RESCHEDULE_REMINDER_TOOL
 from app.conversations.service import ConversationService
 from app.reminders.service import ReminderService
-from app.schemas import ReminderQuery, UserCreate
+from app.schemas import ReminderCreate, ReminderQuery, UserCreate
 from app.users.service import UserService
 
 
@@ -52,10 +54,139 @@ def test_agent_executes_create_tool(db):
     assert '"operation": "created"' in tool_result["content"]
 
 
+def test_agent_discovers_then_reschedules_with_exact_id(db):
+    user = UserService(db).create(UserCreate(name="A", timezone="UTC"))
+    reminder = ReminderService(db).create(
+        user.id,
+        ReminderCreate(
+            title="Call Ali",
+            schedule=datetime.now(timezone.utc) + timedelta(days=1),
+        ),
+    )
+    provider = FakeProvider(
+        [
+            LLMResponse(tool_calls=[ToolCall(name="list_reminders", arguments={"title": "Call Ali", "status": "pending"})]),
+            LLMResponse(tool_calls=[ToolCall(name="reschedule_reminder", arguments={
+                "reminder_id": str(reminder.id),
+                "schedule": "2026-11-16T20:00:00+00:00",
+                "scope": "series",
+            })]),
+            LLMResponse(text="Moved your reminder."),
+        ]
+    )
+    result = ReminderAgent(provider, ReminderService(db), UserService(db), ConversationService(db)).handle(
+        user.id, "Move my Call Ali reminder to Monday at 8 PM"
+    )
+    refreshed = ReminderService(db).list(user.id, ReminderQuery(title="Call Ali"))[0]
+    assert result.response == "Moved your reminder."
+    assert refreshed.schedule.hour == 20
+    assert len(provider.calls) == 3
+
+
+def test_agent_uses_one_filtered_and_one_broad_discovery_before_rescheduling(db):
+    user = UserService(db).create(UserCreate(name="A", timezone="UTC"))
+    reminder = ReminderService(db).create(
+        user.id,
+        ReminderCreate(
+            title="Take medicine",
+            schedule=datetime.now(timezone.utc) + timedelta(days=1),
+        ),
+    )
+    provider = FakeProvider(
+        [
+            LLMResponse(tool_calls=[ToolCall(name="list_reminders", arguments={"title": "medicine", "status": "pending"})]),
+            LLMResponse(tool_calls=[ToolCall(name="list_reminders", arguments={"status": "pending"})]),
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        name="reschedule_reminder",
+                        arguments={
+                            "reminder_id": str(reminder.id),
+                            "schedule": "2026-11-16T17:00:00+00:00",
+                            "scope": "series",
+                        },
+                    )
+                ]
+            ),
+            LLMResponse(text="Moved your medicine reminder."),
+        ]
+    )
+
+    result = ReminderAgent(
+        provider, ReminderService(db), UserService(db), ConversationService(db)
+    ).handle(user.id, "Move my medicine reminder to 5 PM")
+
+    refreshed = ReminderService(db).list(user.id, ReminderQuery(title="Take medicine"))[0]
+    assert result.response == "Moved your medicine reminder."
+    assert refreshed.schedule.hour == 17
+    assert len(provider.calls) == 4
+
+
+def test_agent_can_follow_list_with_mutation_before_final_response(db):
+    user = UserService(db).create(UserCreate(name="A", timezone="UTC"))
+    reminder = ReminderService(db).create(
+        user.id,
+        ReminderCreate(
+            title="Gym workout",
+            schedule=datetime.now(timezone.utc) + timedelta(days=1),
+        ),
+    )
+    provider = FakeProvider(
+        [
+            LLMResponse(tool_calls=[ToolCall(name="list_reminders", arguments={"title": "Gym"})]),
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        name="reschedule_reminder",
+                        arguments={
+                            "reminder_id": str(reminder.id),
+                            "schedule": "2026-11-16T09:00:00+00:00",
+                            "scope": "series",
+                        },
+                    )
+                ]
+            ),
+            LLMResponse(text="Moved your gym reminder."),
+        ]
+    )
+    result = ReminderAgent(provider, ReminderService(db), UserService(db), ConversationService(db)).handle(
+        user.id, "Move my gym reminder to Monday at 9 AM"
+    )
+    refreshed = ReminderService(db).list(user.id, ReminderQuery(title="Gym workout"))[0]
+    assert result.response == "Moved your gym reminder."
+    assert refreshed.schedule.hour == 9
+    assert len(provider.calls) == 3
+
+
 def test_list_tool_allows_null_optional_filters():
     properties = LIST_REMINDERS_TOOL["function"]["parameters"]["properties"]
-    for name in ("title", "start", "end", "status"):
+    for name in ("title", "start", "end", "occurrence_start", "occurrence_end", "status"):
         assert {"type": "null"} in properties[name]["anyOf"]
+    assert {"type": "string", "format": "date"} in properties["start"]["anyOf"]
+
+
+def test_reschedule_tool_is_mutation_only():
+    properties = RESCHEDULE_REMINDER_TOOL["function"]["parameters"]["properties"]
+    assert RESCHEDULE_REMINDER_TOOL["function"]["parameters"]["required"] == [
+        "reminder_id", "schedule", "scope"
+    ]
+    assert "title" not in properties
+    assert "date" not in properties
+    assert "time" not in properties
+
+
+def test_reschedule_requires_an_exact_id_and_does_not_search(db):
+    user = UserService(db).create(UserCreate(name="A", timezone="UTC"))
+    agent = ReminderAgent(FakeProvider(LLMResponse(text="ok")), ReminderService(db), UserService(db), ConversationService(db))
+    result = agent._reschedule(
+        user.id,
+        {
+            "title": "Call Ali",
+            "schedule": "2026-11-16T20:00:00+00:00",
+            "scope": "series",
+        },
+    )
+    assert result["operation"] == "discovery_required"
 
 
 def test_final_llm_response_is_limited_to_25_words(db):

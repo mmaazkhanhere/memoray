@@ -5,6 +5,20 @@ def _optional_string(format_name: str | None = None) -> dict:
     return {"anyOf": [value, {"type": "null"}]}
 
 
+def _optional_date_or_datetime() -> dict:
+    return {
+        "anyOf": [
+            {"type": "string", "format": "date-time"},
+            {"type": "string", "format": "date"},
+            {"type": "null"},
+        ]
+    }
+
+
+def _optional_datetime() -> dict:
+    return {"anyOf": [{"type": "string", "format": "date-time"}, {"type": "null"}]}
+
+
 RECURRENCE_FREQUENCIES = ["daily", "weekly", "monthly", "yearly"]
 
 
@@ -110,14 +124,18 @@ LIST_REMINDERS_TOOL = {
         "name": "list_reminders",
         "description": (
             "List reminders. Questions such as 'do I have anything today?' mean list reminders "
-            "for today's date in the user's timezone."
+            "for today's date in the user's timezone. Use occurrence_start and occurrence_end "
+            "to resolve a narrow pending occurrence window for a recurring reminder without "
+            "loading its full history."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "title": _optional_string(),
-                "start": _optional_string("date-time"),
-                "end": _optional_string("date-time"),
+                "start": _optional_date_or_datetime(),
+                "end": _optional_date_or_datetime(),
+                "occurrence_start": _optional_datetime(),
+                "occurrence_end": _optional_datetime(),
                 "status": {
                     "anyOf": [
                         {"type": "string", "enum": ["pending", "completed"]},
@@ -130,5 +148,59 @@ LIST_REMINDERS_TOOL = {
     },
 }
 
-TOOLS = [UPDATE_REMINDER_DRAFT_TOOL, CREATE_REMINDER_TOOL, CREATE_REMINDERS_TOOL, LIST_REMINDERS_TOOL]
+RESCHEDULE_REMINDER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "reschedule_reminder",
+        "description": (
+            "Mutation only: move one already-resolved active reminder to a strictly future time. "
+            "The exact reminder_id is required; never use this tool to search by title. Use "
+            "scope=occurrence for one pending occurrence and scope=series only when changing the "
+            "entire recurring schedule. occurrence_id is required for occurrence scope."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reminder_id": {"type": "string", "format": "uuid"},
+                "occurrence_id": _optional_string("uuid"),
+                "schedule": {"type": "string", "format": "date-time"},
+                "scope": {
+                    "type": "string",
+                    "enum": ["series", "occurrence"],
+                    "description": "Use occurrence for a named date such as today/tomorrow; use series only when explicitly requested.",
+                },
+            },
+            "required": ["reminder_id", "schedule", "scope"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+SNOOZE_OCCURRENCE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "snooze_occurrence",
+        "description": "Snooze exactly one occurrence that has already been delivered; duration is required and positive.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reminder_id": _optional_string("uuid"),
+                "title": _optional_string(),
+                "occurrence_id": _optional_string("uuid"),
+                "duration_seconds": {"type": "integer", "minimum": 1},
+            },
+            "required": ["duration_seconds"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+TOOLS = [
+    UPDATE_REMINDER_DRAFT_TOOL,
+    CREATE_REMINDER_TOOL,
+    CREATE_REMINDERS_TOOL,
+    LIST_REMINDERS_TOOL,
+    RESCHEDULE_REMINDER_TOOL,
+    SNOOZE_OCCURRENCE_TOOL,
+]
 
