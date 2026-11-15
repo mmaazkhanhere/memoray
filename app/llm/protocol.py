@@ -2,6 +2,10 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 
+class LLMProviderError(RuntimeError):
+    """The configured model provider rejected or failed a request."""
+
+
 @dataclass
 class ToolCall:
     name: str

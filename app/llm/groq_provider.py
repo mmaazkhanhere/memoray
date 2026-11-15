@@ -4,7 +4,7 @@ from time import perf_counter
 from typing import Any
 
 from app.config import Settings
-from app.llm.protocol import LLMResponse, ToolCall
+from app.llm.protocol import LLMProviderError, LLMResponse, ToolCall
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +28,12 @@ class GroqProvider:
             if tools:
                 request["tools"] = tools
                 request["tool_choice"] = "auto"
+            else:
+                request["tool_choice"] = "none"
             response = self.client.chat.completions.create(**request)
-        except Exception:
+        except Exception as exc:
             logger.exception("Groq call failed model=%s", self.model)
-            raise
+            raise LLMProviderError("The language model provider rejected the request") from exc
         message = response.choices[0].message
         calls = [
             ToolCall(
