@@ -20,7 +20,7 @@ from app.reminders.occurrences import advance_recurring_occurrence
 from app.reminders.destinations import DestinationService
 from app.recurrence.schedule import next_occurrence
 from app.schemas import ReminderCreate, ReminderListStatus, ReminderQuery
-from app.time_utils import to_utc, to_user_timezone
+from app.time_utils import to_utc
 from app.users.service import UserService
 
 
