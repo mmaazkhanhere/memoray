@@ -2,7 +2,7 @@ import uuid
 from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
@@ -14,6 +14,7 @@ from app.models import (
     ReminderStatus,
 )
 from app.reminders.errors import DuplicateReminderError, ReminderInPastError
+from app.reminders.destinations import DestinationService
 from app.recurrence.schedule import next_occurrence
 from app.schemas import ReminderCreate, ReminderListStatus, ReminderQuery
 from app.time_utils import to_utc, to_user_timezone
@@ -24,6 +25,7 @@ class ReminderService:
     def __init__(self, db: Session):
         self.db = db
         self.users = UserService(db)
+        self.destinations = DestinationService(db)
 
     def create(self, user_id: uuid.UUID, data: ReminderCreate) -> Reminder:
         user = self.users.get(user_id)
@@ -36,6 +38,11 @@ class ReminderService:
         if schedule <= datetime.now(timezone.utc):
             raise ReminderInPastError("reminder schedule must be in the future")
         normalized_title = data.title.strip().casefold()
+        destination = (
+            self.destinations.get_owned_valid(user.id, data.destination_id)
+            if data.destination_id is not None
+            else self.destinations.default_for_user(user.id)
+        )
         duplicate = self.db.scalar(
             select(Reminder)
             .where(
@@ -58,10 +65,17 @@ class ReminderService:
             recurrence_rule=data.recurrence_rule,
             recurrence_frequency=data.recurrence_frequency,
             recurrence_interval=data.recurrence_interval,
+            destination_id=destination.id,
+            series_anchor_schedule=schedule,
             status=ReminderStatus.active,
         )
         reminder.occurrences.append(
-            ReminderOccurrence(schedule=schedule, next_due_at=schedule, status=OccurrenceStatus.pending)
+            ReminderOccurrence(
+                schedule=schedule,
+                next_due_at=schedule,
+                series_schedule=schedule,
+                status=OccurrenceStatus.pending,
+            )
         )
         self.db.add(reminder)
         try:
@@ -120,7 +134,8 @@ class ReminderService:
 
         occurrence.status = OccurrenceStatus.completed
         if reminder.is_recurring and reminder.recurrence_frequency:
-            local_schedule = to_user_timezone(occurrence.schedule, user.timezone)
+            nominal_schedule = occurrence.series_schedule or occurrence.schedule
+            local_schedule = to_user_timezone(nominal_schedule, user.timezone)
             next_local = next_occurrence(
                 local_schedule, reminder.recurrence_frequency, reminder.recurrence_interval
             )
@@ -134,6 +149,7 @@ class ReminderService:
                 ReminderOccurrence(
                     schedule=next_schedule,
                     next_due_at=next_schedule,
+                    series_schedule=next_schedule,
                     status=OccurrenceStatus.pending,
                 )
             )
@@ -142,6 +158,22 @@ class ReminderService:
         self.db.commit()
         self.db.refresh(reminder)
         return reminder
+
+    def reschedule(self, user_id: uuid.UUID, reminder_id: uuid.UUID, request):
+        from app.reminders.rescheduling import ReminderRescheduler
+
+        return ReminderRescheduler(self.db).reschedule(user_id, reminder_id, request)
+
+    def snooze(
+        self,
+        user_id: uuid.UUID,
+        reminder_id: uuid.UUID,
+        occurrence_id: uuid.UUID,
+        request,
+    ):
+        from app.reminders.snoozing import ReminderSnoozer
+
+        return ReminderSnoozer(self.db).snooze(user_id, reminder_id, occurrence_id, request)
 
     def list(self, user_id: uuid.UUID, query: ReminderQuery) -> list[Reminder]:
         user = self.users.get(user_id)
@@ -157,6 +189,17 @@ class ReminderService:
             statement = statement.where(Reminder.schedule >= to_utc(query.start, user.timezone))
         if query.end:
             statement = statement.where(Reminder.schedule <= to_utc(query.end, user.timezone))
+        if query.occurrence_start or query.occurrence_end:
+            occurrence_filters = [ReminderOccurrence.status == OccurrenceStatus.pending]
+            if query.occurrence_start:
+                occurrence_filters.append(
+                    ReminderOccurrence.schedule >= to_utc(query.occurrence_start, user.timezone)
+                )
+            if query.occurrence_end:
+                occurrence_filters.append(
+                    ReminderOccurrence.schedule <= to_utc(query.occurrence_end, user.timezone)
+                )
+            statement = statement.where(Reminder.occurrences.any(*occurrence_filters))
         if query.status == ReminderListStatus.pending:
             statement = statement.where(
                 Reminder.status == ReminderStatus.active,
@@ -172,4 +215,85 @@ class ReminderService:
                 )
             )
         return list(self.db.scalars(statement).unique().all())
+
+    def list_with_occurrences(
+        self, user_id: uuid.UUID, query: ReminderQuery
+    ) -> list[tuple[Reminder, ReminderOccurrence | None]]:
+        """List reminders with only the relevant pending occurrence loaded.
+
+        This is used by agent discovery so a recurring reminder's full occurrence
+        history is not loaded merely to resolve one requested date.
+        """
+        user = self.users.get(user_id)
+        statement = select(Reminder).where(Reminder.user_id == user_id).order_by(Reminder.schedule.asc())
+        if query.title:
+            statement = statement.where(Reminder.title.ilike(f"%{query.title.strip()}%"))
+        if query.start:
+            statement = statement.where(Reminder.schedule >= to_utc(query.start, user.timezone))
+        if query.end:
+            statement = statement.where(Reminder.schedule <= to_utc(query.end, user.timezone))
+        if query.occurrence_start or query.occurrence_end:
+            occurrence_filters = [ReminderOccurrence.status == OccurrenceStatus.pending]
+            if query.occurrence_start:
+                occurrence_filters.append(
+                    ReminderOccurrence.schedule >= to_utc(query.occurrence_start, user.timezone)
+                )
+            if query.occurrence_end:
+                occurrence_filters.append(
+                    ReminderOccurrence.schedule <= to_utc(query.occurrence_end, user.timezone)
+                )
+            statement = statement.where(Reminder.occurrences.any(*occurrence_filters))
+        if query.status == ReminderListStatus.pending:
+            statement = statement.where(
+                Reminder.status == ReminderStatus.active,
+                Reminder.occurrences.any(
+                    ReminderOccurrence.status.in_([OccurrenceStatus.pending, OccurrenceStatus.notified])
+                ),
+            )
+        elif query.status == ReminderListStatus.completed:
+            statement = statement.where(
+                or_(
+                    Reminder.status == ReminderStatus.completed,
+                    Reminder.occurrences.any(ReminderOccurrence.status == OccurrenceStatus.completed),
+                )
+            )
+        reminders = list(self.db.scalars(statement).all())
+        if not reminders:
+            return []
+
+        occurrence_statuses = [OccurrenceStatus.pending, OccurrenceStatus.notified]
+        if query.status == ReminderListStatus.completed:
+            occurrence_statuses = [OccurrenceStatus.completed]
+        if query.occurrence_start or query.occurrence_end:
+            occurrence_statuses = [OccurrenceStatus.pending]
+        ranked_occurrences = select(
+            ReminderOccurrence.id.label("occurrence_id"),
+            func.row_number()
+            .over(
+                partition_by=ReminderOccurrence.reminder_id,
+                order_by=ReminderOccurrence.schedule.asc(),
+            )
+            .label("occurrence_rank"),
+        ).where(
+            ReminderOccurrence.reminder_id.in_([item.id for item in reminders]),
+            ReminderOccurrence.status.in_(occurrence_statuses),
+        )
+        if query.occurrence_start:
+            ranked_occurrences = ranked_occurrences.where(
+                ReminderOccurrence.schedule >= to_utc(query.occurrence_start, user.timezone)
+            )
+        if query.occurrence_end:
+            ranked_occurrences = ranked_occurrences.where(
+                ReminderOccurrence.schedule <= to_utc(query.occurrence_end, user.timezone)
+            )
+        ranked_subquery = ranked_occurrences.subquery()
+        occurrence_statement = select(ReminderOccurrence).join(
+            ranked_subquery,
+            ReminderOccurrence.id == ranked_subquery.c.occurrence_id,
+        ).where(ranked_subquery.c.occurrence_rank == 1)
+        occurrences = list(self.db.scalars(occurrence_statement).all())
+        by_reminder: dict[uuid.UUID, ReminderOccurrence] = {}
+        for occurrence in occurrences:
+            by_reminder.setdefault(occurrence.reminder_id, occurrence)
+        return [(item, by_reminder.get(item.id)) for item in reminders]
 
