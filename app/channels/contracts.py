@@ -1,3 +1,4 @@
+import uuid
 from dataclasses import dataclass
 
 
@@ -28,6 +29,12 @@ class IncomingMessage:
     display_name: str | None = None
     contact: IncomingContact | None = None
     voice: IncomingVoice | None = None
+    # Telegram callback queries use the same inbound pipeline as text updates.
+    # Keeping the parsed occurrence ID here means channel routing does not need
+    # to understand Telegram's raw payload shape.
+    completion_occurrence_id: uuid.UUID | None = None
+    callback_query_id: str | None = None
+    callback_message_id: int | None = None
 
 
 @dataclass(frozen=True)

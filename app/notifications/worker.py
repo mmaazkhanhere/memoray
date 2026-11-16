@@ -41,6 +41,9 @@ class TelegramDeliveryAdapter:
             notification.content,
             request_phone=notification.request_phone,
             idempotency_key=notification.provider_idempotency_key,
+            # This adapter is Telegram-specific; do not gate the button on a
+            # reloaded enum value (some DB drivers return its string value).
+            done_occurrence_id=notification.occurrence_id,
         )
 
 

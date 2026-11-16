@@ -1,4 +1,5 @@
 import json
+import uuid
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -41,6 +42,7 @@ class TelegramBotClient:
         *,
         request_phone: bool = False,
         idempotency_key: str | None = None,
+        done_occurrence_id: uuid.UUID | None = None,
     ) -> None:
         payload = {"chat_id": chat_id, "text": text}
         if request_phone:
@@ -51,6 +53,12 @@ class TelegramBotClient:
                 ],
                 "resize_keyboard": True,
                 "one_time_keyboard": True,
+            }
+        elif done_occurrence_id is not None:
+            payload["reply_markup"] = {
+                "inline_keyboard": [
+                    [{"text": "Done", "callback_data": f"done:{done_occurrence_id}"}]
+                ]
             }
         else:
             payload["reply_markup"] = {"remove_keyboard": True}
@@ -99,6 +107,52 @@ class TelegramBotClient:
                 description,
                 classification="permanent",
                 invalidate_identity=True,
+            )
+
+    def answer_callback_query(self, callback_query_id: str) -> None:
+        """Acknowledge a Telegram inline-button press."""
+        if not callback_query_id.strip():
+            raise TelegramUpdateError("Telegram callback query id is required")
+        request = Request(
+            f"https://api.telegram.org/bot{self.token}/answerCallbackQuery",
+            data=json.dumps({"callback_query_id": callback_query_id}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with self.opener(request, timeout=15) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            raise TelegramDeliveryError("Telegram callback acknowledgement failed") from exc
+        if not result.get("ok"):
+            raise TelegramDeliveryError(
+                str(result.get("description") or "Telegram rejected callback acknowledgement"),
+                classification="permanent",
+            )
+
+    def remove_inline_keyboard(self, chat_id: str, message_id: int) -> None:
+        """Remove the Done button from a reminder message after completion."""
+        request = Request(
+            f"https://api.telegram.org/bot{self.token}/editMessageReplyMarkup",
+            data=json.dumps(
+                {
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "reply_markup": {"inline_keyboard": []},
+                }
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with self.opener(request, timeout=15) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            raise TelegramDeliveryError("Telegram inline keyboard removal failed") from exc
+        if not result.get("ok"):
+            raise TelegramDeliveryError(
+                str(result.get("description") or "Telegram rejected inline keyboard removal"),
+                classification="permanent",
             )
 
     def get_file(self, file_id: str) -> str:
@@ -157,6 +211,41 @@ class TelegramBotClient:
 def parse_update(payload: dict) -> IncomingMessage:
     if not isinstance(payload, dict) or "update_id" not in payload:
         raise TelegramUpdateError("Telegram update_id is required")
+    callback_query = payload.get("callback_query")
+    if callback_query is not None:
+        if not isinstance(callback_query, dict):
+            raise TelegramUpdateError("Telegram callback query is invalid")
+        sender = callback_query.get("from")
+        message = callback_query.get("message")
+        data = callback_query.get("data")
+        if not isinstance(sender, dict) or sender.get("id") is None:
+            raise TelegramUpdateError("Telegram callback sender is required")
+        if not isinstance(message, dict):
+            raise TelegramUpdateError("Telegram callback message is required")
+        chat = message.get("chat")
+        if not isinstance(chat, dict) or chat.get("id") is None:
+            raise TelegramUpdateError("Telegram callback chat is required")
+        if not isinstance(data, str) or not data.startswith("done:"):
+            raise TelegramUpdateError("unsupported Telegram callback")
+        try:
+            occurrence_id = uuid.UUID(data.removeprefix("done:"))
+        except ValueError as exc:
+            raise TelegramUpdateError("Telegram completion callback is invalid") from exc
+        message_id = message.get("message_id")
+        if message_id is not None and (
+            not isinstance(message_id, int) or isinstance(message_id, bool)
+        ):
+            raise TelegramUpdateError("Telegram callback message id is invalid")
+        return IncomingMessage(
+            channel="telegram",
+            external_update_id=str(payload["update_id"]),
+            external_user_id=str(sender["id"]),
+            external_chat_id=str(chat["id"]),
+            completion_occurrence_id=occurrence_id,
+            callback_query_id=str(callback_query.get("id") or "") or None,
+            callback_message_id=message_id,
+        )
+
     message = payload.get("message")
     if not isinstance(message, dict):
         raise TelegramUpdateError("unsupported Telegram update")

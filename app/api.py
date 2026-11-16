@@ -42,7 +42,7 @@ from app.schemas import (
     UserCreate,
 )
 from app.users.service import UserService
-from app.models import User
+from app.models import OccurrenceStatus, ReminderOccurrence, User
 
 app = FastAPI(title="Memoray Reminder and Memory Agent", version="0.1.0")
 configure_logging()
@@ -282,6 +282,31 @@ async def telegram_webhook(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     client = TelegramBotClient(settings.telegram_bot_token)
+    if incoming.callback_query_id:
+        try:
+            client.answer_callback_query(incoming.callback_query_id)
+        except RuntimeError:
+            # The completion is already durable; Telegram may retry the
+            # callback acknowledgement independently of the outbox send.
+            pass
+    callback_occurrence = (
+        db.get(ReminderOccurrence, incoming.completion_occurrence_id)
+        if incoming.completion_occurrence_id is not None
+        else None
+    )
+    if (
+        incoming.callback_message_id is not None
+        and callback_occurrence is not None
+        and callback_occurrence.status == OccurrenceStatus.completed
+    ):
+        try:
+            client.remove_inline_keyboard(
+                incoming.external_chat_id, incoming.callback_message_id
+            )
+        except RuntimeError:
+            # The reminder transition and confirmation outbox are already
+            # durable; the callback update can safely be retried for cleanup.
+            pass
     for record in records:
         try:
             client.send_message(

@@ -1,6 +1,7 @@
 import uuid
 import hashlib
 import json
+import inspect
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -21,6 +22,7 @@ from app.models import (
     OutboundMessage,
 )
 from app.onboarding.service import OnboardingService
+from app.reminders.completion import CompletionService
 
 
 class ChannelMessageService:
@@ -57,6 +59,18 @@ class ChannelMessageService:
             if account.onboarding_state != ChannelAccountState.completed:
                 result = onboarding.handle(account, message)
                 replies = result.replies if result.handled else []
+            elif message.completion_occurrence_id is not None:
+                completion = CompletionService(self.db).complete_by_id(
+                    account.user_id,
+                    message.completion_occurrence_id,
+                )
+                replies = [
+                    OutgoingMessage(
+                        message.channel,
+                        message.external_chat_id,
+                        self._completion_reply(completion),
+                    )
+                ]
             elif message.text and message.text.strip().casefold() == "/start":
                 replies = [
                     OutgoingMessage(
@@ -64,11 +78,21 @@ class ChannelMessageService:
                     )
                 ]
             else:
-                result = self.agent_factory(self.db).handle(
-                    account.user_id,
-                    message.text or "",
-                    account.conversation_id,
-                )
+                agent = self.agent_factory(self.db)
+                handle = agent.handle
+                if "commit" in inspect.signature(handle).parameters:
+                    result = handle(
+                        account.user_id,
+                        message.text or "",
+                        account.conversation_id,
+                        commit=False,
+                    )
+                else:
+                    result = handle(
+                        account.user_id,
+                        message.text or "",
+                        account.conversation_id,
+                    )
                 account.conversation_id = result.conversation_id
                 replies = [
                     OutgoingMessage(message.channel, message.external_chat_id, result.response)
@@ -94,6 +118,18 @@ class ChannelMessageService:
         except Exception:
             self.db.rollback()
             raise
+
+    @staticmethod
+    def _completion_reply(result) -> str:
+        if result.operation == "completed":
+            return f"Done — I marked {result.reminder.title} as completed."
+        if result.operation == "already_completed":
+            return f"{result.reminder.title} was already completed."
+        if result.operation == "not_delivered":
+            return "I can only mark a reminder done after it has been delivered."
+        if result.operation == "not_found":
+            return "I couldn't find that reminder occurrence."
+        return "I couldn't mark that reminder done."
 
     def complete_claimed(
         self,
@@ -128,6 +164,13 @@ class ChannelMessageService:
                     "user_id": message.external_user_id,
                     "chat_id": message.external_chat_id,
                     "text": message.text,
+                    "completion_occurrence_id": (
+                        str(message.completion_occurrence_id)
+                        if message.completion_occurrence_id is not None
+                        else None
+                    ),
+                    "callback_query_id": message.callback_query_id,
+                    "callback_message_id": message.callback_message_id,
                     "voice": (
                         {
                             "file_id": message.voice.file_id,
