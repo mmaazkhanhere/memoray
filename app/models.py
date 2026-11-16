@@ -33,6 +33,22 @@ class DeliveryChannel(str, enum.Enum):
     webhook = "webhook"
 
 
+class ChannelKind(str, enum.Enum):
+    telegram = "telegram"
+
+
+class ChannelAccountState(str, enum.Enum):
+    needs_name = "needs_name"
+    needs_timezone = "needs_timezone"
+    needs_phone_decision = "needs_phone_decision"
+    completed = "completed"
+
+
+class InboundEventStatus(str, enum.Enum):
+    processing = "processing"
+    completed = "completed"
+
+
 class RecurrenceFrequency(str, enum.Enum):
     daily = "daily"
     weekly = "weekly"
@@ -62,8 +78,8 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    name: Mapped[str] = mapped_column(String(200), nullable=False)
-    timezone: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    timezone: Mapped[str | None] = mapped_column(String(64), nullable=True)
     auth_token_hash: Mapped[str | None] = mapped_column(String(128), unique=True, nullable=True)
     status: Mapped[UserStatus] = mapped_column(
         Enum(UserStatus, name="user_status"), default=UserStatus.active, nullable=False
@@ -81,6 +97,112 @@ class User(Base):
     destinations: Mapped[list["DeliveryDestination"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    channel_accounts: Mapped[list["ChannelAccount"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    phone_links: Mapped[list["PhoneLink"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+
+
+class ChannelAccount(Base):
+    """Maps an external channel identity to exactly one internal user."""
+
+    __tablename__ = "channel_accounts"
+    __table_args__ = (
+        Index(
+            "uq_channel_accounts_channel_external_user",
+            "channel",
+            "external_user_id",
+            unique=True,
+        ),
+        Index("ix_channel_accounts_user_channel", "user_id", "channel"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    channel: Mapped[ChannelKind] = mapped_column(Enum(ChannelKind, name="channel_kind"), nullable=False)
+    external_user_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    external_chat_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    onboarding_state: Mapped[ChannelAccountState] = mapped_column(
+        Enum(ChannelAccountState, name="channel_account_state"),
+        default=ChannelAccountState.needs_timezone,
+        nullable=False,
+    )
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("reminder_conversations.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    user: Mapped[User] = relationship(back_populates="channel_accounts")
+
+
+class PhoneLink(Base):
+    __tablename__ = "phone_links"
+    __table_args__ = (
+        Index(
+            "uq_active_phone_links_e164",
+            "e164_number",
+            unique=True,
+            postgresql_where=text("is_active = true"),
+            sqlite_where=text("is_active = 1"),
+        ),
+        Index("ix_phone_links_user_active", "user_id", "is_active"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    e164_number: Mapped[str] = mapped_column(String(32), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    user: Mapped[User] = relationship(back_populates="phone_links")
+
+
+class InboundEvent(Base):
+    __tablename__ = "inbound_events"
+    __table_args__ = (
+        Index("uq_inbound_events_channel_external_id", "channel", "external_update_id", unique=True),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    channel: Mapped[ChannelKind] = mapped_column(
+        Enum(ChannelKind, name="inbound_channel_kind"), nullable=False
+    )
+    external_update_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    status: Mapped[InboundEventStatus] = mapped_column(
+        Enum(InboundEventStatus, name="inbound_event_status"),
+        default=InboundEventStatus.processing,
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class OutboundMessage(Base):
+    __tablename__ = "outbound_messages"
+    __table_args__ = (Index("ix_outbound_messages_pending", "channel", "sent_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    inbound_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("inbound_events.id", ondelete="SET NULL"), nullable=True
+    )
+    channel: Mapped[ChannelKind] = mapped_column(
+        Enum(ChannelKind, name="outbound_channel_kind"), nullable=False
+    )
+    external_chat_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    request_phone: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    attempts: Mapped[int] = mapped_column(default=0, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class DeliveryDestination(Base):

@@ -1,0 +1,152 @@
+import uuid
+from datetime import datetime, timezone
+from typing import Callable
+
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from app.agent.service import ReminderAgent
+from app.channels.contracts import IncomingMessage, OutgoingMessage
+from app.models import (
+    ChannelAccount,
+    ChannelAccountState,
+    ChannelKind,
+    InboundEvent,
+    InboundEventStatus,
+    OutboundMessage,
+)
+from app.onboarding.service import OnboardingService
+
+
+class ChannelMessageService:
+    """Coordinates channel identity, onboarding, idempotency, and agent routing."""
+
+    def __init__(self, db: Session, agent_factory: Callable[[Session], ReminderAgent]):
+        self.db = db
+        self.agent_factory = agent_factory
+
+    def process(self, message: IncomingMessage) -> list[OutboundMessage]:
+        try:
+            event = self._claim_event(message)
+            if event is None:
+                return self.pending_for(message.channel, message.external_chat_id)
+
+            account = self._account_for(message)
+            onboarding = OnboardingService(self.db)
+            if account.onboarding_state != ChannelAccountState.completed:
+                result = onboarding.handle(account, message)
+                replies = result.replies if result.handled else []
+            elif message.text and message.text.strip().casefold() == "/start":
+                replies = [
+                    OutgoingMessage(
+                        message.channel, message.external_chat_id, "Welcome back! How can I help?"
+                    )
+                ]
+            else:
+                result = self.agent_factory(self.db).handle(
+                    account.user_id,
+                    message.text or "",
+                    account.conversation_id,
+                )
+                account.conversation_id = result.conversation_id
+                replies = [
+                    OutgoingMessage(message.channel, message.external_chat_id, result.response)
+                ]
+
+            records = [
+                OutboundMessage(
+                    inbound_event_id=event.id,
+                    channel=ChannelKind(reply.channel),
+                    external_chat_id=reply.external_chat_id,
+                    content=reply.text,
+                    request_phone=reply.request_phone,
+                )
+                for reply in replies
+            ]
+            self.db.add_all(records)
+            event.status = InboundEventStatus.completed
+            event.completed_at = datetime.now(timezone.utc)
+            self.db.commit()
+            # Include older unsent replies so a later webhook retries the
+            # durable outbox without rerunning the business operation.
+            return self.pending_for(message.channel, message.external_chat_id)
+        except Exception:
+            self.db.rollback()
+            raise
+
+    def _claim_event(self, message: IncomingMessage) -> InboundEvent | None:
+        existing = self.db.scalar(
+            select(InboundEvent).where(
+                InboundEvent.channel == ChannelKind(message.channel),
+                InboundEvent.external_update_id == message.external_update_id,
+            )
+        )
+        if existing is not None:
+            return None
+        event = InboundEvent(
+            channel=ChannelKind(message.channel),
+            external_update_id=message.external_update_id,
+            status=InboundEventStatus.processing,
+        )
+        try:
+            with self.db.begin_nested():
+                self.db.add(event)
+                self.db.flush()
+        except IntegrityError:
+            self.db.expire_all()
+            return None
+        return event
+
+    def _account_for(self, message: IncomingMessage) -> ChannelAccount:
+        account = self.db.scalar(
+            select(ChannelAccount).where(
+                ChannelAccount.channel == ChannelKind(message.channel),
+                ChannelAccount.external_user_id == message.external_user_id,
+            )
+        )
+        if account is not None:
+            account.external_chat_id = message.external_chat_id
+            return account
+        onboarding = OnboardingService(self.db)
+        try:
+            with self.db.begin_nested():
+                account = onboarding.create_account(message)
+        except IntegrityError:
+            account = self.db.scalar(
+                select(ChannelAccount).where(
+                    ChannelAccount.channel == ChannelKind(message.channel),
+                    ChannelAccount.external_user_id == message.external_user_id,
+                )
+            )
+            if account is None:
+                raise
+        return account
+
+    def pending_for(self, channel: str, external_chat_id: str) -> list[OutboundMessage]:
+        return list(
+            self.db.scalars(
+                select(OutboundMessage).where(
+                    OutboundMessage.channel == ChannelKind(channel),
+                    OutboundMessage.external_chat_id == external_chat_id,
+                    OutboundMessage.sent_at.is_(None),
+                ).order_by(OutboundMessage.created_at.asc())
+            )
+        )
+
+    def mark_sent(self, message_id: uuid.UUID) -> None:
+        message = self.db.get(OutboundMessage, message_id)
+        if message is None:
+            return
+        message.sent_at = datetime.now(timezone.utc)
+        message.attempts += 1
+        message.last_error = None
+        self.db.commit()
+
+    def mark_failed(self, message_id: uuid.UUID, error: str) -> None:
+        message = self.db.get(OutboundMessage, message_id)
+        if message is None:
+            return
+        message.attempts += 1
+        message.last_error = error[:1000]
+        self.db.commit()
