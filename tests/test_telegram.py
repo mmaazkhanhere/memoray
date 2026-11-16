@@ -5,6 +5,7 @@ import pytest
 from app.channels.contracts import IncomingContact, IncomingMessage, IncomingVoice
 from app.channels.service import ChannelMessageService
 from app.integrations.telegram.adapter import TelegramUpdateError, parse_update
+from app.notifications.worker import TelegramDeliveryAdapter
 from app.integrations.telegram.voice import (
     TelegramVoiceTranscriber,
     VoiceLimits,
@@ -18,6 +19,7 @@ from app.models import (
     OutboundMessage,
     PhoneLink,
     User,
+    DeliveryChannel,
 )
 
 
@@ -132,6 +134,55 @@ def test_telegram_parser_requires_sender_and_preserves_contact_owner():
 
     with pytest.raises(TelegramUpdateError):
         parse_update({"update_id": 42})
+
+
+def test_telegram_parser_extracts_done_callback():
+    occurrence_id = uuid.uuid4()
+    parsed = parse_update(
+        {
+            "update_id": 45,
+            "callback_query": {
+                "id": "callback-1",
+                "from": {"id": 7},
+                "message": {"chat": {"id": 8}, "message_id": 99},
+                "data": f"done:{occurrence_id}",
+            },
+        }
+    )
+
+    assert parsed.completion_occurrence_id == occurrence_id
+    assert parsed.callback_query_id == "callback-1"
+    assert parsed.callback_message_id == 99
+
+
+def test_telegram_delivery_adapter_always_attaches_done_occurrence():
+    class FakeClient:
+        def __init__(self):
+            self.kwargs = None
+
+        def send_message(self, *args, **kwargs):
+            self.kwargs = kwargs
+
+    client = FakeClient()
+    adapter = TelegramDeliveryAdapter.__new__(TelegramDeliveryAdapter)
+    adapter.client = client
+    occurrence_id = uuid.uuid4()
+    notification = type(
+        "Notification",
+        (),
+        {
+            "destination_snapshot": "chat-1",
+            "content": "Reminder: pay bill",
+            "request_phone": False,
+            "provider_idempotency_key": "key-1",
+            "occurrence_id": occurrence_id,
+            "channel": DeliveryChannel.telegram,
+        },
+    )()
+
+    adapter.send(notification)
+
+    assert client.kwargs["done_occurrence_id"] == occurrence_id
 
 
 def test_telegram_parser_extracts_voice_metadata_and_rejects_invalid_voice():
