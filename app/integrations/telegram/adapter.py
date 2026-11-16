@@ -1,8 +1,9 @@
 import json
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from app.channels.contracts import IncomingContact, IncomingMessage
+from app.channels.contracts import IncomingContact, IncomingMessage, IncomingVoice
 
 
 class TelegramUpdateError(ValueError):
@@ -22,6 +23,10 @@ class TelegramDeliveryError(RuntimeError):
         self.classification = classification
         self.retry_after = retry_after
         self.invalidate_identity = invalidate_identity
+
+
+class TelegramMediaError(RuntimeError):
+    """Telegram media could not be fetched or did not pass local limits."""
 
 
 class TelegramBotClient:
@@ -96,6 +101,58 @@ class TelegramBotClient:
                 invalidate_identity=True,
             )
 
+    def get_file(self, file_id: str) -> str:
+        if not file_id.strip():
+            raise TelegramMediaError("Telegram voice file id is required")
+        request = Request(
+            f"https://api.telegram.org/bot{self.token}/getFile?file_id={quote(file_id, safe='')}",
+            method="GET",
+        )
+        try:
+            with self.opener(request, timeout=15) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
+            raise TelegramMediaError("Telegram voice file could not be located") from exc
+        if not isinstance(result, dict):
+            raise TelegramMediaError("Telegram returned an invalid file response")
+        result_data = result.get("result")
+        file_path = (
+            result_data.get("file_path")
+            if result.get("ok") and isinstance(result_data, dict)
+            else None
+        )
+        if not isinstance(file_path, str) or not file_path:
+            raise TelegramMediaError("Telegram did not return a voice file path")
+        return file_path
+
+    def download_file(self, file_path: str, *, max_bytes: int) -> bytes:
+        if not file_path or file_path.startswith(("/", "\\")) or ".." in file_path.split("/"):
+            raise TelegramMediaError("Telegram returned an invalid voice file path")
+        request = Request(
+            f"https://api.telegram.org/file/bot{self.token}/{file_path}", method="GET"
+        )
+        try:
+            with self.opener(request, timeout=30) as response:
+                chunks: list[bytes] = []
+                total = 0
+                while True:
+                    try:
+                        chunk = response.read(64 * 1024)
+                    except TypeError:
+                        # Small test doubles and some urllib-compatible streams expose read().
+                        chunk = response.read()
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise TelegramMediaError("Telegram voice note is too large")
+                    chunks.append(chunk)
+        except TelegramMediaError:
+            raise
+        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            raise TelegramMediaError("Telegram voice note could not be downloaded") from exc
+        return b"".join(chunks)
+
 
 def parse_update(payload: dict) -> IncomingMessage:
     if not isinstance(payload, dict) or "update_id" not in payload:
@@ -121,6 +178,39 @@ def parse_update(payload: dict) -> IncomingMessage:
             owner_external_id=str(owner_id) if owner_id is not None else None,
         )
     text = message.get("text")
+    voice_data = message.get("voice")
+    unsupported_media = any(
+        key in message for key in ("audio", "document", "photo", "video", "video_note", "animation")
+    )
+    if text is None and contact_data is None and voice_data is None and unsupported_media:
+        raise TelegramUpdateError("unsupported Telegram media; send a voice note or text message")
+    voice = None
+    if voice_data is not None:
+        if not isinstance(voice_data, dict):
+            raise TelegramUpdateError("Telegram voice metadata is invalid")
+        file_id = str(voice_data.get("file_id") or "").strip()
+        duration = voice_data.get("duration")
+        if (
+            not file_id
+            or not isinstance(duration, int)
+            or isinstance(duration, bool)
+            or duration <= 0
+        ):
+            raise TelegramUpdateError("Telegram voice file_id and positive duration are required")
+        file_size = voice_data.get("file_size")
+        if file_size is not None and (
+            not isinstance(file_size, int) or isinstance(file_size, bool) or file_size <= 0
+        ):
+            raise TelegramUpdateError("Telegram voice file_size is invalid")
+        voice = IncomingVoice(
+            file_id=file_id,
+            file_unique_id=str(voice_data.get("file_unique_id") or "") or None,
+            mime_type=str(voice_data.get("mime_type") or "") or None,
+            duration_seconds=duration,
+            file_size=file_size,
+        )
+        if text is not None:
+            raise TelegramUpdateError("Telegram update cannot contain both text and voice")
     return IncomingMessage(
         channel="telegram",
         external_update_id=str(payload["update_id"]),
@@ -129,4 +219,5 @@ def parse_update(payload: dict) -> IncomingMessage:
         text=str(text) if text is not None else None,
         display_name=display_name,
         contact=contact,
+        voice=voice,
     )

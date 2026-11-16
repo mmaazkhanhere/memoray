@@ -1,5 +1,6 @@
 import uuid
 import hmac
+from dataclasses import replace
 from datetime import datetime
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
@@ -10,8 +11,15 @@ from app.core.auth import authorize_user, get_current_user
 from app.core.logging_config import configure_logging
 from app.db import get_db
 from app.agent.factory import create_agent
+from app.channels.contracts import OutgoingMessage
 from app.channels.service import ChannelMessageService
 from app.integrations.telegram.adapter import TelegramBotClient, TelegramUpdateError, parse_update
+from app.integrations.telegram.voice import (
+    TelegramVoiceTranscriber,
+    VoiceLimits,
+    VoiceProcessingError,
+)
+from app.stt.factory import create_speech_to_text
 from app.reminders.serialization import to_response
 from app.reminders.errors import DuplicateReminderError, ReminderInPastError
 from app.reminders.service import ReminderService
@@ -235,7 +243,37 @@ async def telegram_webhook(
     try:
         incoming = parse_update(payload)
         channel_service = ChannelMessageService(db, create_agent)
-        records = channel_service.process(incoming)
+        if incoming.voice is None:
+            records = channel_service.process(incoming)
+        else:
+            event = channel_service.claim(incoming)
+            if event is None:
+                records = channel_service.pending_for(
+                    incoming.channel, incoming.external_chat_id
+                )
+            else:
+                try:
+                    stt = create_speech_to_text(settings)
+                    transcriber = TelegramVoiceTranscriber(
+                        TelegramBotClient(settings.telegram_bot_token),
+                        stt,
+                        VoiceLimits.from_settings(settings),
+                    )
+                    transcript = transcriber.transcribe(incoming.voice)
+                    text_message = replace(incoming, text=transcript, voice=None)
+                    records = channel_service.process_claimed(text_message, event)
+                except (VoiceProcessingError, ValueError) as exc:
+                    records = channel_service.complete_claimed(
+                        event,
+                        OutgoingMessage(
+                            channel=incoming.channel,
+                            external_chat_id=incoming.external_chat_id,
+                            text=(
+                                "I couldn't understand that voice note. Please try again, "
+                                "or send the command as text."
+                            ),
+                        ),
+                    )
     except TelegramUpdateError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:

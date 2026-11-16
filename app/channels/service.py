@@ -31,11 +31,27 @@ class ChannelMessageService:
         self.agent_factory = agent_factory
 
     def process(self, message: IncomingMessage) -> list[OutboundMessage]:
+        event = self.claim(message)
+        if event is None:
+            return self.pending_for(message.channel, message.external_chat_id)
+        return self.process_claimed(message, event)
+
+    def claim(self, message: IncomingMessage) -> InboundEvent | None:
+        """Durably claim an update before any external work is performed."""
         try:
             event = self._claim_event(message)
             if event is None:
-                return self.pending_for(message.channel, message.external_chat_id)
+                return None
+            self.db.commit()
+            return event
+        except Exception:
+            self.db.rollback()
+            raise
 
+    def process_claimed(
+        self, message: IncomingMessage, event: InboundEvent
+    ) -> list[OutboundMessage]:
+        try:
             account = self._account_for(message)
             onboarding = OnboardingService(self.db)
             if account.onboarding_state != ChannelAccountState.completed:
@@ -79,6 +95,30 @@ class ChannelMessageService:
             self.db.rollback()
             raise
 
+    def complete_claimed(
+        self,
+        event: InboundEvent,
+        reply: OutgoingMessage,
+    ) -> list[OutboundMessage]:
+        """Persist a non-agent reply for a claimed event, such as STT failure."""
+        try:
+            self.db.add(
+                OutboundMessage(
+                    inbound_event_id=event.id,
+                    channel=ChannelKind(reply.channel),
+                    external_chat_id=reply.external_chat_id,
+                    content=reply.text,
+                    request_phone=reply.request_phone,
+                )
+            )
+            event.status = InboundEventStatus.completed
+            event.completed_at = datetime.now(timezone.utc)
+            self.db.commit()
+            return self.pending_for(reply.channel, reply.external_chat_id)
+        except Exception:
+            self.db.rollback()
+            raise
+
     def _claim_event(self, message: IncomingMessage) -> InboundEvent | None:
         payload_hash = hashlib.sha256(
             json.dumps(
@@ -88,6 +128,17 @@ class ChannelMessageService:
                     "user_id": message.external_user_id,
                     "chat_id": message.external_chat_id,
                     "text": message.text,
+                    "voice": (
+                        {
+                            "file_id": message.voice.file_id,
+                            "file_unique_id": message.voice.file_unique_id,
+                            "mime_type": message.voice.mime_type,
+                            "duration_seconds": message.voice.duration_seconds,
+                            "file_size": message.voice.file_size,
+                        }
+                        if message.voice is not None
+                        else None
+                    ),
                 },
                 sort_keys=True,
                 separators=(",", ":"),

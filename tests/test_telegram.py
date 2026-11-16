@@ -2,9 +2,15 @@ import uuid
 
 import pytest
 
-from app.channels.contracts import IncomingContact, IncomingMessage
+from app.channels.contracts import IncomingContact, IncomingMessage, IncomingVoice
 from app.channels.service import ChannelMessageService
 from app.integrations.telegram.adapter import TelegramUpdateError, parse_update
+from app.integrations.telegram.voice import (
+    TelegramVoiceTranscriber,
+    VoiceLimits,
+    VoiceProcessingError,
+)
+from app.stt.protocol import AudioInput
 from app.models import (
     ChannelAccount,
     ChannelAccountState,
@@ -126,6 +132,108 @@ def test_telegram_parser_requires_sender_and_preserves_contact_owner():
 
     with pytest.raises(TelegramUpdateError):
         parse_update({"update_id": 42})
+
+
+def test_telegram_parser_extracts_voice_metadata_and_rejects_invalid_voice():
+    parsed = parse_update(
+        {
+            "update_id": 43,
+            "message": {
+                "from": {"id": 7},
+                "chat": {"id": 8},
+                "voice": {
+                    "file_id": "file-1",
+                    "file_unique_id": "unique-1",
+                    "duration": 4,
+                    "mime_type": "audio/ogg",
+                    "file_size": 100,
+                },
+            },
+        }
+    )
+    assert parsed.text is None
+    assert parsed.voice.file_id == "file-1"
+    assert parsed.voice.mime_type == "audio/ogg"
+
+    with pytest.raises(TelegramUpdateError):
+        parse_update(
+            {
+                "update_id": 44,
+                "message": {
+                    "from": {"id": 7},
+                    "chat": {"id": 8},
+                    "voice": {"file_id": "file-1", "duration": 0},
+                },
+            }
+        )
+
+
+class FakeTelegramMedia:
+    def __init__(self, content=b"audio"):
+        self.content = content
+        self.downloads = 0
+
+    def get_file(self, file_id):
+        assert file_id == "file-1"
+        return "voice/file-1.oga"
+
+    def download_file(self, file_path, *, max_bytes):
+        self.downloads += 1
+        assert file_path == "voice/file-1.oga"
+        return self.content
+
+
+class FakeSpeechToText:
+    def __init__(self, transcript):
+        self.transcript = transcript
+        self.calls = []
+
+    def transcribe(self, audio: AudioInput):
+        self.calls.append(audio)
+        return self.transcript
+
+
+def test_voice_transcriber_validates_downloads_and_delegates_to_provider():
+    telegram = FakeTelegramMedia()
+    provider = FakeSpeechToText(" remind me tomorrow at 9 ")
+    service = TelegramVoiceTranscriber(
+        telegram,
+        provider,
+        VoiceLimits(max_duration_seconds=30, max_bytes=100),
+    )
+    transcript = service.transcribe(
+        IncomingVoice("file-1", "unique-1", "audio/ogg", duration_seconds=4, file_size=6)
+    )
+    assert transcript == "remind me tomorrow at 9"
+    assert telegram.downloads == 1
+    assert provider.calls[0].filename == "file-1.ogg"
+    assert provider.calls[0].content == b"audio"
+
+
+def test_empty_voice_transcript_is_rejected_before_agent_processing():
+    service = TelegramVoiceTranscriber(
+        FakeTelegramMedia(),
+        FakeSpeechToText("  "),
+        VoiceLimits(max_duration_seconds=30, max_bytes=100),
+    )
+    with pytest.raises(VoiceProcessingError):
+        service.transcribe(IncomingVoice("file-1", None, "audio/ogg", 4, 6))
+
+
+def test_voice_update_claim_is_idempotent_before_transcription(db):
+    service = channel_service(db)
+    message = incoming(50, sender="10", chat="10")
+    message = IncomingMessage(
+        channel=message.channel,
+        external_update_id=message.external_update_id,
+        external_user_id=message.external_user_id,
+        external_chat_id=message.external_chat_id,
+        voice=IncomingVoice("file-1", "unique-1", "audio/ogg", 4, 6),
+    )
+
+    assert service.claim(message) is not None
+    assert service.claim(message) is None
+    assert db.query(InboundEvent).count() == 1
 
 
 def test_database_failure_does_not_report_onboarding_success(db, monkeypatch):

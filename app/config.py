@@ -7,6 +7,11 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://memoray:memoray@localhost:5432/memoray"
     groq_api_key: str | None = None
     groq_model: str = "openai/gpt-oss-120b"
+    stt_provider: str = "groq"
+    stt_model: str = "whisper-large-v3-turbo"
+    stt_api_key: str | None = None
+    telegram_voice_max_duration_seconds: int = 120
+    telegram_voice_max_bytes: int = 10 * 1024 * 1024
     embedding_provider: str = "gemini"
     embedding_api_key: str | None = None
     gemini_api_key: str | None = None

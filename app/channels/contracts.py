@@ -8,6 +8,17 @@ class IncomingContact:
 
 
 @dataclass(frozen=True)
+class IncomingVoice:
+    """Telegram voice metadata; audio bytes are fetched only by the Telegram adapter."""
+
+    file_id: str
+    file_unique_id: str | None
+    mime_type: str | None
+    duration_seconds: int
+    file_size: int | None = None
+
+
+@dataclass(frozen=True)
 class IncomingMessage:
     channel: str
     external_update_id: str
@@ -16,6 +27,7 @@ class IncomingMessage:
     text: str | None = None
     display_name: str | None = None
     contact: IncomingContact | None = None
+    voice: IncomingVoice | None = None
 
 
 @dataclass(frozen=True)
