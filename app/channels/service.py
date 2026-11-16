@@ -1,4 +1,6 @@
 import uuid
+import hashlib
+import json
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -11,6 +13,8 @@ from app.channels.contracts import IncomingMessage, OutgoingMessage
 from app.models import (
     ChannelAccount,
     ChannelAccountState,
+    ChannelIdentity,
+    ChannelIdentityStatus,
     ChannelKind,
     InboundEvent,
     InboundEventStatus,
@@ -76,6 +80,19 @@ class ChannelMessageService:
             raise
 
     def _claim_event(self, message: IncomingMessage) -> InboundEvent | None:
+        payload_hash = hashlib.sha256(
+            json.dumps(
+                {
+                    "channel": message.channel,
+                    "update_id": message.external_update_id,
+                    "user_id": message.external_user_id,
+                    "chat_id": message.external_chat_id,
+                    "text": message.text,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
         existing = self.db.scalar(
             select(InboundEvent).where(
                 InboundEvent.channel == ChannelKind(message.channel),
@@ -83,10 +100,13 @@ class ChannelMessageService:
             )
         )
         if existing is not None:
+            if existing.payload_hash and existing.payload_hash != payload_hash:
+                raise ValueError("inbound event ID was reused with a different payload")
             return None
         event = InboundEvent(
             channel=ChannelKind(message.channel),
             external_update_id=message.external_update_id,
+            payload_hash=payload_hash,
             status=InboundEventStatus.processing,
         )
         try:
@@ -107,6 +127,7 @@ class ChannelMessageService:
         )
         if account is not None:
             account.external_chat_id = message.external_chat_id
+            self._sync_identity(account)
             return account
         onboarding = OnboardingService(self.db)
         try:
@@ -121,7 +142,33 @@ class ChannelMessageService:
             )
             if account is None:
                 raise
+        self._sync_identity(account)
         return account
+
+    def _sync_identity(self, account: ChannelAccount) -> ChannelIdentity:
+        identity = self.db.scalar(
+            select(ChannelIdentity).where(
+                ChannelIdentity.channel == account.channel,
+                ChannelIdentity.external_principal_id == account.external_user_id,
+            )
+        )
+        if identity is None:
+            identity = ChannelIdentity(
+                user_id=account.user_id,
+                channel=account.channel,
+                external_principal_id=account.external_user_id,
+                external_destination_id=account.external_chat_id,
+                status=ChannelIdentityStatus.linked,
+                is_default=True,
+                verified_at=datetime.now(timezone.utc),
+            )
+            self.db.add(identity)
+        else:
+            identity.external_destination_id = account.external_chat_id
+            identity.status = ChannelIdentityStatus.linked
+            identity.verified_at = identity.verified_at or datetime.now(timezone.utc)
+        self.db.flush()
+        return identity
 
     def pending_for(self, channel: str, external_chat_id: str) -> list[OutboundMessage]:
         return list(

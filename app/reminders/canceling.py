@@ -4,6 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models import OccurrenceStatus, Reminder, ReminderStatus
+from app.notifications.service import NotificationService
 from app.reminders.errors import (
     OccurrenceNotCancelableError,
     ReminderNotActiveError,
@@ -55,6 +56,7 @@ class ReminderCanceler:
             if occurrence.status != OccurrenceStatus.pending:
                 raise OccurrenceNotCancelableError("only pending occurrences can be canceled")
             occurrence.status = OccurrenceStatus.canceled
+            NotificationService(self.db).cancel_for_occurrence(occurrence.id)
             advance_recurring_occurrence(reminder, occurrence, user.timezone)
             self._update_next_schedule(reminder)
         elif request.scope == CancellationScope.series:
@@ -71,11 +73,11 @@ class ReminderCanceler:
         self.db.refresh(reminder)
         return reminder
 
-    @staticmethod
-    def _cancel_pending_occurrences(reminder: Reminder) -> None:
+    def _cancel_pending_occurrences(self, reminder: Reminder) -> None:
         for occurrence in reminder.occurrences:
             if occurrence.status == OccurrenceStatus.pending:
                 occurrence.status = OccurrenceStatus.canceled
+                NotificationService(self.db).cancel_for_occurrence(occurrence.id)
 
     @staticmethod
     def _update_next_schedule(reminder: Reminder) -> None:

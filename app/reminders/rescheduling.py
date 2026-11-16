@@ -4,7 +4,15 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models import OccurrenceStatus, Reminder, ReminderOccurrence, ReminderStatus
+from app.models import (
+    ChannelIdentity,
+    ChannelIdentityStatus,
+    OccurrenceStatus,
+    Reminder,
+    ReminderOccurrence,
+    ReminderStatus,
+)
+from app.notifications.service import NotificationService
 from app.reminders.destinations import DestinationService
 from app.reminders.errors import (
     InvalidDestinationError,
@@ -97,6 +105,33 @@ class ReminderRescheduler:
             reminder.series_anchor_schedule = schedule
 
         reminder.destination_id = destination.id
+        identity = None
+        if request.destination_id is None:
+            identity = self.db.scalar(
+                select(ChannelIdentity)
+                .where(
+                    ChannelIdentity.user_id == user_id,
+                    ChannelIdentity.status == ChannelIdentityStatus.linked,
+                    ChannelIdentity.is_default.is_(True),
+                )
+                .order_by(ChannelIdentity.created_at.asc())
+            )
+        for pending_occurrence in (
+            [occurrence]
+            if scope == RescheduleScope.occurrence
+            else [item for item in reminder.occurrences if item.status == OccurrenceStatus.pending]
+        ):
+            NotificationService(self.db).replace_pending(
+                reminder,
+                pending_occurrence,
+                content=f"Reminder: {reminder.title}",
+                identity=identity,
+                channel=None if identity else destination.channel,
+                destination_id=destination.id,
+                destination_snapshot=(
+                    identity.external_destination_id if identity is not None else destination.identity
+                ),
+            )
         self.db.commit()
         self.db.refresh(reminder)
         return reminder

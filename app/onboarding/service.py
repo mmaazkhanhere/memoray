@@ -1,10 +1,20 @@
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.channels.contracts import IncomingContact, IncomingMessage, OutgoingMessage
-from app.models import ChannelAccount, ChannelAccountState, ChannelKind, User, UserStatus
+from app.models import (
+    ChannelAccount,
+    ChannelAccountState,
+    ChannelIdentity,
+    ChannelIdentityStatus,
+    ChannelKind,
+    User,
+    UserStatus,
+)
 from app.phones.service import PhoneService
 from app.time_utils import validate_timezone
 
@@ -121,6 +131,25 @@ class OnboardingService:
                     raw_number=message.contact.phone_number,
                 )
                 self.phones.link(account.user.id, number)
+                has_default_phone = self.db.scalar(
+                    select(ChannelIdentity.id).where(
+                        ChannelIdentity.user_id == account.user.id,
+                        ChannelIdentity.channel == ChannelKind.phone,
+                        ChannelIdentity.status == ChannelIdentityStatus.linked,
+                        ChannelIdentity.is_default.is_(True),
+                    )
+                )
+                self.db.add(
+                    ChannelIdentity(
+                        user_id=account.user.id,
+                        channel=ChannelKind.phone,
+                        external_principal_id=number,
+                        external_destination_id=number,
+                        status=ChannelIdentityStatus.linked,
+                        is_default=has_default_phone is None,
+                        verified_at=datetime.now(timezone.utc),
+                    )
+                )
             except ValueError as exc:
                 return OnboardingResult(account, [self._reply(account, str(exc))], True)
             account.onboarding_state = ChannelAccountState.completed

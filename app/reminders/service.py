@@ -9,12 +9,15 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.models import (
+    ChannelIdentity,
+    ChannelIdentityStatus,
     OccurrenceStatus,
     RecurrenceFrequency,
     Reminder,
     ReminderOccurrence,
     ReminderStatus,
 )
+from app.notifications.service import NotificationService
 from app.reminders.errors import DuplicateReminderError, ReminderInPastError
 from app.reminders.occurrences import advance_recurring_occurrence
 from app.reminders.destinations import DestinationService
@@ -82,6 +85,32 @@ class ReminderService:
         )
         self.db.add(reminder)
         try:
+            self.db.flush()
+            occurrence = reminder.occurrences[0]
+            identity = None
+            if data.destination_id is None:
+                identity = self.db.scalar(
+                    select(ChannelIdentity)
+                    .where(
+                        ChannelIdentity.user_id == user.id,
+                        ChannelIdentity.status == ChannelIdentityStatus.linked,
+                        ChannelIdentity.is_default.is_(True),
+                    )
+                    .order_by(ChannelIdentity.created_at.asc())
+                )
+            NotificationService(self.db).schedule(
+                reminder,
+                occurrence,
+                content=f"Reminder: {reminder.title}",
+                identity=identity,
+                channel=None if identity else destination.channel,
+                destination_id=destination.id if destination else None,
+                destination_snapshot=(
+                    identity.external_destination_id
+                    if identity is not None
+                    else destination.identity
+                ),
+            )
             self.db.commit()
         except IntegrityError as exc:
             self.db.rollback()
@@ -139,6 +168,28 @@ class ReminderService:
         if reminder.is_recurring and reminder.recurrence_frequency:
             next_record = advance_recurring_occurrence(reminder, occurrence, user.timezone)
             reminder.schedule = next_record.schedule
+            identity = self.db.scalar(
+                select(ChannelIdentity)
+                .where(
+                    ChannelIdentity.user_id == user.id,
+                    ChannelIdentity.status == ChannelIdentityStatus.linked,
+                    ChannelIdentity.is_default.is_(True),
+                )
+                .order_by(ChannelIdentity.created_at.asc())
+            )
+            NotificationService(self.db).schedule(
+                reminder,
+                next_record,
+                content=f"Reminder: {reminder.title}",
+                identity=identity,
+                channel=None if identity else reminder.destination.channel if reminder.destination else None,
+                destination_id=reminder.destination_id,
+                destination_snapshot=(
+                    identity.external_destination_id
+                    if identity is not None
+                    else reminder.destination.identity if reminder.destination else None
+                ),
+            )
         else:
             reminder.status = ReminderStatus.completed
         self.db.commit()
