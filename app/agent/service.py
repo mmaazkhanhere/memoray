@@ -1,4 +1,5 @@
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
@@ -56,8 +57,12 @@ memory. If multiple candidates match, ask which one the user means instead of gu
 Do not guess IDs, schedules, or scope.
 
 **Responses:** For unrelated requests, state that you only manage reminders and memories. After successful tool results, respond warmly
-in ≤25 words using only the returned information.
+in ≤25 words using only the returned information. Reply in conversational, humanized way without emojis
 """
+
+INTERNAL_ID_PATTERN = re.compile(
+    r"(?i)\b(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{32})\b"
+)
 
 
 @dataclass
@@ -93,6 +98,15 @@ class ReminderAgent:
         self.conversations.record_message(conversation.id, ConversationMessageRole.user, message)
 
         history = self.conversations.recent_messages(conversation, limit=4)
+        history = [
+            {
+                **item,
+                "content": self._redact_internal_ids(item["content"])
+                if item.get("role") == "assistant"
+                else item["content"],
+            }
+            for item in history
+        ]
         if not history or history[-1].get("content") != message:
             history.append({"role": "user", "content": message})
         draft = conversation.draft
@@ -217,7 +231,7 @@ class ReminderAgent:
                 "content": (
                     "Tool results are below. Follow the discovery-before-mutation rules in the system "
                     "instructions. Otherwise write only the final conversational response:\n"
-                    f"{json.dumps(last_tool_results)}"
+                    f"{self._redact_internal_ids(json.dumps(last_tool_results))}"
                 ),
             }
             working_messages = working_messages + [final_context]
@@ -232,7 +246,7 @@ class ReminderAgent:
                     continue
             final_response = self.provider.complete(
                 [
-                    *working_messages[:-1],
+                    *self._redact_messages(working_messages[:-1]),
                     {
                         "role": "system",
                         "content": "Final response mode: do not call tools; write only the answer.",
@@ -600,3 +614,19 @@ class ReminderAgent:
     @staticmethod
     def _limit_words(text: str, limit: int = 25) -> str:
         return " ".join(text.split()[:limit])
+
+    @staticmethod
+    def _redact_internal_ids(value: str) -> str:
+        return INTERNAL_ID_PATTERN.sub("[internal id]", value)
+
+    @classmethod
+    def _redact_messages(cls, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                **message,
+                "content": cls._redact_internal_ids(message["content"])
+                if isinstance(message.get("content"), str)
+                else message.get("content"),
+            }
+            for message in messages
+        ]
