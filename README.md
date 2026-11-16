@@ -14,6 +14,17 @@ uv run uvicorn app.api:app --reload
 
 The agent exposes `POST /users/{user_id}/agent` and the underlying reminder operations are also available at `POST /users/{user_id}/reminders`, `GET /users/{user_id}/reminders`, `POST /users/{user_id}/reminders/{reminder_id}/reschedule`, `POST /users/{user_id}/reminders/{reminder_id}/cancel`, and `POST /users/{user_id}/reminders/{reminder_id}/occurrences/{occurrence_id}/snooze`.
 
+The agent can also save durable user facts as memories and retrieve them with pgvector cosine search. Memories have no
+schedule and are isolated by user. Saving an unclear fact causes the agent to ask for clarification. Retrieval only
+answers from indexed candidates; no match is reported as unknown and multiple matches produce a clarification question.
+
+Memory indexing defaults to Gemini `gemini-embedding-001` and uses `GEMINI_API_KEY`,
+`EMBEDDING_PROVIDER`, `EMBEDDING_MODEL`, and `EMBEDDING_DIMENSIONS`. The memory service depends only on the
+provider-neutral `EmbeddingProvider` interface; adapters can be selected by changing `EMBEDDING_PROVIDER`.
+Run `uv run alembic upgrade head` after starting the pgvector-enabled database. If the embedding provider is unavailable,
+the memory remains durable with a pending or failed embedding status and can be retried through
+`MemoryService.retry_pending`.
+
 Agent requests may include a `conversation_id`. If omitted, the response creates one. Reminder creation details are saved as a draft between turns until title, date, and time are complete. Recurring reminders additionally require `daily`, `weekly`, `monthly`, or `yearly` frequency.
 
 When one message contains multiple complete reminder requests, the agent uses a batch creation tool and returns one conversational response after processing each item.
