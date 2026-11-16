@@ -9,12 +9,34 @@ class TelegramUpdateError(ValueError):
     pass
 
 
+class TelegramDeliveryError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        classification: str = "retryable",
+        retry_after: float | None = None,
+        invalidate_identity: bool = False,
+    ):
+        super().__init__(message)
+        self.classification = classification
+        self.retry_after = retry_after
+        self.invalidate_identity = invalidate_identity
+
+
 class TelegramBotClient:
     def __init__(self, token: str, *, opener=urlopen):
         self.token = token
         self.opener = opener
 
-    def send_message(self, chat_id: str, text: str, *, request_phone: bool = False) -> None:
+    def send_message(
+        self,
+        chat_id: str,
+        text: str,
+        *,
+        request_phone: bool = False,
+        idempotency_key: str | None = None,
+    ) -> None:
         payload = {"chat_id": chat_id, "text": text}
         if request_phone:
             payload["reply_markup"] = {
@@ -27,19 +49,52 @@ class TelegramBotClient:
             }
         else:
             payload["reply_markup"] = {"remove_keyboard": True}
+        headers = {"Content-Type": "application/json"}
+        if idempotency_key:
+            headers["X-Idempotency-Key"] = idempotency_key
         request = Request(
             f"https://api.telegram.org/bot{self.token}/sendMessage",
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
         try:
             with self.opener(request, timeout=15) as response:
                 result = json.loads(response.read().decode("utf-8"))
-        except (HTTPError, URLError, TimeoutError, OSError) as exc:
-            raise RuntimeError("Telegram message delivery failed") from exc
+        except HTTPError as exc:
+            retry_after = None
+            try:
+                retry_after = float(exc.headers.get("Retry-After"))
+            except (TypeError, ValueError):
+                pass
+            if exc.code == 429:
+                raise TelegramDeliveryError(
+                    "Telegram rate limit",
+                    classification="retryable",
+                    retry_after=retry_after,
+                ) from exc
+            if 500 <= exc.code < 600:
+                raise TelegramDeliveryError("Telegram server error", classification="retryable") from exc
+            raise TelegramDeliveryError(
+                f"Telegram rejected request with HTTP {exc.code}",
+                classification="permanent",
+                invalidate_identity=exc.code in {400, 403, 404},
+            ) from exc
+        except (URLError, TimeoutError, OSError) as exc:
+            raise TelegramDeliveryError("Telegram network result was uncertain", classification="unknown") from exc
         if not result.get("ok"):
-            raise RuntimeError("Telegram rejected the message")
+            description = str(result.get("description") or "Telegram rejected the message")
+            parameters = result.get("parameters") or {}
+            retry_after = parameters.get("retry_after")
+            if result.get("error_code") == 429:
+                raise TelegramDeliveryError(
+                    description, classification="retryable", retry_after=retry_after
+                )
+            raise TelegramDeliveryError(
+                description,
+                classification="permanent",
+                invalidate_identity=True,
+            )
 
 
 def parse_update(payload: dict) -> IncomingMessage:
