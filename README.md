@@ -64,3 +64,11 @@ The first `/start` creates one account for the Telegram sender and collects any 
 The user may share Telegram's native contact or skip phone linking. Phone linking is optional for Telegram use but
 required for future live-call delivery. Sender identity, phone ownership, and Telegram update IDs are protected by
 database constraints and idempotent processing; a Telegram sender can never resolve another sender's account.
+
+Telegram voice notes are validated, downloaded through the Telegram Bot API, and transcribed through the configured
+provider-neutral speech-to-text interface. Groq Whisper is the default adapter (`STT_PROVIDER=groq` and
+`STT_MODEL=whisper-large-v3-turbo`; `STT_API_KEY` may be used, otherwise `GROQ_API_KEY` is reused). The transcript is processed through the same channel and agent path as a typed
+message. Empty or failed transcription produces a text retry response and does not mutate reminders or memories.
+The Telegram update ID is claimed before media or STT work, so replaying a voice update does not download, transcribe,
+or execute it again. Voice command replies are sent synchronously as Telegram text; scheduled reminder delivery
+remains the responsibility of the separate notification worker.
