@@ -236,3 +236,11 @@ class ReminderDraft(Base):
 
     conversation: Mapped[ReminderConversation] = relationship(back_populates="draft")
 
+
+# Keep the declarative registry complete for Alembic and local test databases while
+# keeping memory behavior in the app.memories package.
+from app.memories import models as _memory_models  # noqa: E402,F401
+
+Memory = _memory_models.Memory
+MemoryEmbeddingStatus = _memory_models.MemoryEmbeddingStatus
+
