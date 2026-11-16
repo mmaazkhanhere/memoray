@@ -33,6 +33,7 @@ def test_agent_executes_create_tool(db):
     user = UserService(db).create(UserCreate(name="A", timezone="UTC"))
     provider = FakeProvider(
         [
+            LLMResponse(tool_calls=[ToolCall(name="list_reminders", arguments={"title": "Call Ali"})]),
             LLMResponse(
                 tool_calls=[
                     ToolCall(
@@ -81,6 +82,77 @@ def test_agent_discovers_then_reschedules_with_exact_id(db):
     assert result.response == "Moved your reminder."
     assert refreshed.schedule.hour == 20
     assert len(provider.calls) == 3
+
+
+def test_discovery_ids_are_available_to_followup_tool_calls_but_not_final_text(db):
+    user = UserService(db).create(UserCreate(name="A", timezone="UTC"))
+    reminder = ReminderService(db).create(
+        user.id,
+        ReminderCreate(
+            title="Call Ali",
+            schedule=datetime.now(timezone.utc) + timedelta(days=1),
+        ),
+    )
+    provider = FakeProvider(
+        [
+            LLMResponse(tool_calls=[ToolCall(name="list_reminders", arguments={"title": "Call Ali"})]),
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        name="reschedule_reminder",
+                        arguments={
+                            "reminder_id": str(reminder.id),
+                            "schedule": (datetime.now(timezone.utc) + timedelta(days=2)).isoformat(),
+                            "scope": "series",
+                        },
+                    )
+                ]
+            ),
+            LLMResponse(text=f"Moved reminder {reminder.id}."),
+        ]
+    )
+    result = ReminderAgent(
+        provider, ReminderService(db), UserService(db), ConversationService(db)
+    ).handle(user.id, "Move my Call Ali reminder")
+
+    second_call_messages = provider.calls[1][0]
+    assert str(reminder.id) in second_call_messages[-1]["content"]
+    assert "[internal id]" not in second_call_messages[-1]["content"]
+    assert str(reminder.id) not in result.response
+    assert "[internal id]" in result.response
+
+
+def test_successful_reschedule_cannot_be_reported_as_pending(db):
+    user = UserService(db).create(UserCreate(name="A", timezone="UTC"))
+    reminder = ReminderService(db).create(
+        user.id,
+        ReminderCreate(
+            title="Call Ali",
+            schedule=datetime.now(timezone.utc) + timedelta(days=1),
+        ),
+    )
+    provider = FakeProvider(
+        [
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        name="reschedule_reminder",
+                        arguments={
+                            "reminder_id": str(reminder.id),
+                            "schedule": (datetime.now(timezone.utc) + timedelta(days=2)).isoformat(),
+                            "scope": "series",
+                        },
+                    )
+                ]
+            ),
+            LLMResponse(text="I'll need to run the reschedule tool once I can."),
+        ]
+    )
+    result = ReminderAgent(
+        provider, ReminderService(db), UserService(db), ConversationService(db)
+    ).handle(user.id, "Move my Call Ali reminder")
+
+    assert result.response == "Done — I moved your reminder."
 
 
 def test_agent_uses_one_filtered_and_one_broad_discovery_before_rescheduling(db):

@@ -54,7 +54,8 @@ about a remembered fact. Use only returned candidates. If no candidate matches, 
 memory. If multiple candidates match, ask which one the user means instead of guessing.
 
 **Tool safety:** Call each mutation once after discovery. Never re-fetch to verify success or repeat successful mutations.
-Do not guess IDs, schedules, or scope.
+Do not guess IDs, schedules, or scope. When a discovery tool returns an opaque UUID, copy that exact UUID into the
+next mutation tool call; never substitute placeholders such as `[internal id]`.
 
 **Responses:** For unrelated requests, state that you only manage reminders and memories. After successful tool results, respond warmly
 in ≤25 words using only the returned information. Reply in conversational, humanized way without emojis
@@ -231,7 +232,7 @@ class ReminderAgent:
                 "content": (
                     "Tool results are below. Follow the discovery-before-mutation rules in the system "
                     "instructions. Otherwise write only the final conversational response:\n"
-                    f"{self._redact_internal_ids(json.dumps(last_tool_results))}"
+                    f"{json.dumps(last_tool_results)}"
                 ),
             }
             working_messages = working_messages + [final_context]
@@ -244,14 +245,24 @@ class ReminderAgent:
                     discovery_calls == 1 and discovery_result.get("count") == 0
                 ):
                     continue
+            redacted_final_context = {
+                **working_messages[-1],
+                "content": self._redact_internal_ids(working_messages[-1]["content"]),
+            }
             final_response = self.provider.complete(
                 [
                     *self._redact_messages(working_messages[:-1]),
                     {
                         "role": "system",
-                        "content": "Final response mode: do not call tools; write only the answer.",
+                        "content": (
+                            "Final response mode: do not call tools; write only the answer. "
+                            "Tool results are authoritative and have already been executed. "
+                            "If the results contain operation=rescheduled, created, created_batch, "
+                            "canceled, or snoozed, confirm that it completed in the past tense. "
+                            "Never say that a tool call is still needed or pending."
+                        ),
                     },
-                    working_messages[-1],
+                    redacted_final_context,
                 ],
                 [],
             )
@@ -263,7 +274,10 @@ class ReminderAgent:
         if memory_retrieval_result is not None:
             text = self._ground_memory_response(memory_retrieval_result)
         else:
-            text = self._limit_words(final_response.text)
+            grounded_text = self._ground_successful_mutation_response(
+                final_response.text, last_tool_results
+            )
+            text = self._redact_internal_ids(self._limit_words(grounded_text))
         self.conversations.record_message(conversation.id, ConversationMessageRole.assistant, text)
         draft_operations = {"draft_updated", "draft_not_updated", "created", "created_batch", "not_created"}
         draft_status = (
@@ -614,6 +628,31 @@ class ReminderAgent:
     @staticmethod
     def _limit_words(text: str, limit: int = 25) -> str:
         return " ".join(text.split()[:limit])
+
+    @staticmethod
+    def _ground_successful_mutation_response(
+        text: str, tool_results: list[dict[str, Any]]
+    ) -> str:
+        """Prevent a final LLM response from contradicting an already-completed mutation."""
+        successful_operations = {
+            str(result.get("operation"))
+            for result in tool_results
+            if result.get("operation")
+            in {"rescheduled", "created", "created_batch", "canceled", "snoozed"}
+        }
+        if not successful_operations:
+            return text
+        lowered = text.casefold()
+        contradictory = ("need to", "requires a tool", "once i", "still need", "will be updated")
+        if not any(phrase in lowered for phrase in contradictory):
+            return text
+        if "rescheduled" in successful_operations:
+            return "Done — I moved your reminder."
+        if "canceled" in successful_operations:
+            return "Done — I canceled your reminder."
+        if "snoozed" in successful_operations:
+            return "Done — I snoozed your reminder."
+        return "Done — your reminder was created."
 
     @staticmethod
     def _redact_internal_ids(value: str) -> str:
