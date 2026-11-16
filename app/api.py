@@ -10,6 +10,8 @@ from app.core.auth import authorize_user, get_current_user
 from app.core.logging_config import configure_logging
 from app.db import get_db
 from app.llm.groq_provider import GroqProvider
+from app.memories.embedding import create_embedding_provider
+from app.memories.service import MemoryService
 from app.reminders.serialization import to_response
 from app.reminders.errors import DuplicateReminderError, ReminderInPastError
 from app.reminders.service import ReminderService
@@ -35,7 +37,7 @@ from app.conversations.service import ConversationService
 from app.users.service import UserService
 from app.models import User
 
-app = FastAPI(title="Memoray Reminder Agent", version="0.1.0")
+app = FastAPI(title="Memoray Reminder and Memory Agent", version="0.1.0")
 configure_logging()
 
 
@@ -200,12 +202,22 @@ def agent_message(
 ):
     try:
         authorize_user(user_id, current_user)
-        provider = GroqProvider(get_settings())
+        settings = get_settings()
+        provider = GroqProvider(settings)
+        embedding_provider = create_embedding_provider(settings)
         result = ReminderAgent(
             provider,
             ReminderService(db),
             UserService(db),
             ConversationService(db),
+            MemoryService(
+                db,
+                embedding_provider,
+                embedding_model=settings.embedding_model,
+                embedding_dimensions=settings.embedding_dimensions,
+                candidate_limit=settings.memory_candidate_limit,
+                min_similarity=settings.memory_min_similarity,
+            ),
         ).handle(user_id, request.message, request.conversation_id)
         return {
             "conversation_id": result.conversation_id,

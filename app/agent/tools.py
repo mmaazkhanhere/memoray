@@ -218,6 +218,43 @@ SNOOZE_OCCURRENCE_TOOL = {
     },
 }
 
+CREATE_MEMORY_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "create_memory",
+        "description": (
+            "Store one durable fact only when the user explicitly asks you to remember it. "
+            "The fact must be clear and complete; never infer or fill in missing details. "
+            "Memories are not reminders and have no schedule. If the request is ambiguous, ask "
+            "a clarification question instead of calling this tool."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"content": {"type": "string", "minLength": 1}},
+            "required": ["content"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+RETRIEVE_MEMORIES_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "retrieve_memories",
+        "description": (
+            "Retrieve durable facts that may answer the user's question. Always use this before "
+            "answering a question about something the user asked you to remember. Only facts in "
+            "the returned candidates may be used; never invent a missing fact."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "minLength": 1}},
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 TOOLS = [
     UPDATE_REMINDER_DRAFT_TOOL,
     CREATE_REMINDER_TOOL,
@@ -226,5 +263,7 @@ TOOLS = [
     RESCHEDULE_REMINDER_TOOL,
     CANCEL_REMINDER_TOOL,
     SNOOZE_OCCURRENCE_TOOL,
+    CREATE_MEMORY_TOOL,
+    RETRIEVE_MEMORIES_TOOL,
 ]
 

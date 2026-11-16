@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from app.agent.tools import TOOLS
 from app.conversations.service import ConversationService
 from app.llm.protocol import LLMProvider
+from app.memories.service import MemoryService
 from app.models import ConversationMessageRole, DraftStatus, RecurrenceFrequency
 from app.reminders.canceling import ReminderCanceler
 from app.reminders.errors import DuplicateReminderError, ReminderInPastError
@@ -28,7 +29,7 @@ from app.schemas import (
 from app.time_utils import to_user_timezone
 from app.users.service import UserService
 
-SYSTEM_PROMPT = """You are Memoray, a reminder assistant. You create, list, reschedule, cancel, and snooze reminders.
+SYSTEM_PROMPT = """You are Memoray, a reminder and memory assistant. You create, list, reschedule, cancel, and snooze reminders, and save or retrieve durable user memories.
 
 **Creation:** Require title, date, and time; recurring reminders also require frequency (daily, weekly, monthly, yearly)
 and optional interval. Use the draft tool for missing fields and `create_reminders` for multiple complete requests. Never
@@ -45,10 +46,16 @@ filtering by title and `status=pending`, then at most once without title. Use `s
 `scope=occurrence` with exact pending `occurrence_id` to skip one instance, or `scope=series` only when explicitly requested.
 Never cancel ambiguous or unmatched reminders; clarify or report none found.
 
+**Memories:** A memory is a durable fact attached to this user, not a reminder and never a scheduled task. Call
+`create_memory` only after the user explicitly asks you to remember one clear, complete fact. If the request or fact is
+unclear, ask a clarification question and do not save anything. Call `retrieve_memories` before answering a question
+about a remembered fact. Use only returned candidates. If no candidate matches, say that you do not have a matching
+memory. If multiple candidates match, ask which one the user means instead of guessing.
+
 **Tool safety:** Call each mutation once after discovery. Never re-fetch to verify success or repeat successful mutations.
 Do not guess IDs, schedules, or scope.
 
-**Responses:** For unrelated requests, state that you only manage reminders. After successful tool results, respond warmly
+**Responses:** For unrelated requests, state that you only manage reminders and memories. After successful tool results, respond warmly
 in ≤25 words using only the returned information.
 """
 
@@ -67,11 +74,13 @@ class ReminderAgent:
         reminder_service: ReminderService,
         user_service: UserService,
         conversation_service: ConversationService,
+        memory_service: MemoryService | None = None,
     ):
         self.provider = provider
         self.reminders = reminder_service
         self.users = user_service
         self.conversations = conversation_service
+        self.memories = memory_service
 
     def handle(
         self,
@@ -111,6 +120,7 @@ class ReminderAgent:
         discovery_calls = 0
         mutation_attempted = False
         last_discovery_result: dict[str, Any] | None = None
+        memory_retrieval_result: dict[str, Any] | None = None
         for _ in range(4):
             response = self.provider.complete(working_messages, TOOLS)
             if not response.tool_calls:
@@ -198,6 +208,8 @@ class ReminderAgent:
                     mutation_attempted = True
                 result = self._execute_tool(user_id, conversation, call)
                 last_tool_results.append(result)
+                if call.name == "retrieve_memories":
+                    memory_retrieval_result = result
                 if call.name == "list_reminders" and mutation_workflow:
                     last_discovery_result = result
             final_context = {
@@ -230,11 +242,14 @@ class ReminderAgent:
                 [],
             )
             break
-        if final_response is None:
+        if final_response is None and memory_retrieval_result is None:
             raise RuntimeError("LLM did not return a final response after reminder tool calls")
-        if not final_response.text:
+        if not final_response.text and memory_retrieval_result is None:
             raise RuntimeError("LLM did not return a final response after the reminder tool call")
-        text = self._limit_words(final_response.text)
+        if memory_retrieval_result is not None:
+            text = self._ground_memory_response(memory_retrieval_result)
+        else:
+            text = self._limit_words(final_response.text)
         self.conversations.record_message(conversation.id, ConversationMessageRole.assistant, text)
         draft_operations = {"draft_updated", "draft_not_updated", "created", "created_batch", "not_created"}
         draft_status = (
@@ -263,7 +278,58 @@ class ReminderAgent:
             return self._cancel(user_id, call.arguments)
         if call.name == "snooze_occurrence":
             return self._snooze(user_id, call.arguments)
+        if call.name == "create_memory":
+            return self._create_memory(user_id, call.arguments)
+        if call.name == "retrieve_memories":
+            return self._retrieve_memories(user_id, call.arguments)
         return {"operation": "rejected", "error": "unsupported reminder operation"}
+
+    def _create_memory(self, user_id: uuid.UUID, arguments: dict[str, Any]) -> dict[str, Any]:
+        if self.memories is None:
+            return {"operation": "memory_not_created", "error": "Memory storage is not configured."}
+        try:
+            memory = self.memories.create(user_id, arguments.get("content", ""))
+        except (TypeError, ValueError, LookupError) as exc:
+            return {"operation": "memory_not_created", "error": str(exc)}
+        return {
+            "operation": "memory_created",
+            "memory": {
+                "id": str(memory.id),
+                "content": memory.content,
+                "embedding_status": memory.embedding_status.value,
+            },
+        }
+
+    def _retrieve_memories(self, user_id: uuid.UUID, arguments: dict[str, Any]) -> dict[str, Any]:
+        if self.memories is None:
+            return {"operation": "memory_not_retrieved", "error": "Memory retrieval is not configured."}
+        if self.memories.embedding_provider is None:
+            return {
+                "operation": "memory_not_retrieved",
+                "error": "Memory embedding provider is not configured.",
+                "candidates": [],
+            }
+        try:
+            candidates = self.memories.retrieve(user_id, arguments.get("query", ""))
+        except (TypeError, ValueError, LookupError) as exc:
+            return {"operation": "memory_not_retrieved", "error": str(exc), "candidates": []}
+        return {
+            "operation": "memories_retrieved",
+            "count": len(candidates),
+            "candidates": candidates,
+        }
+
+    @staticmethod
+    def _ground_memory_response(result: dict[str, Any]) -> str:
+        candidates = result.get("candidates") or []
+        if result.get("operation") != "memories_retrieved":
+            return "I couldn't search your memories right now."
+        if not candidates:
+            return "I don't have a matching memory."
+        if len(candidates) > 1:
+            facts = "; ".join(str(item.get("content", "")) for item in candidates)
+            return f"I found multiple matching memories: {facts}. Which one did you mean?"
+        return f"I remember: {candidates[0].get('content', '')}"
 
     def _update_draft(self, conversation, arguments: dict[str, Any]) -> dict[str, Any]:
         try:
