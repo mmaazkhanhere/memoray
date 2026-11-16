@@ -26,15 +26,33 @@ class OccurrenceStatus(str, enum.Enum):
     canceled = "canceled"
 
 
+class NotificationStatus(str, enum.Enum):
+    pending = "pending"
+    sending = "sending"
+    sent = "sent"
+    failed = "failed"
+    unknown = "unknown"
+    canceled = "canceled"
+
+
 class DeliveryChannel(str, enum.Enum):
     in_app = "in_app"
     email = "email"
     sms = "sms"
     webhook = "webhook"
+    telegram = "telegram"
+    phone = "phone"
 
 
 class ChannelKind(str, enum.Enum):
     telegram = "telegram"
+    phone = "phone"
+
+
+class ChannelIdentityStatus(str, enum.Enum):
+    linked = "linked"
+    unlinked = "unlinked"
+    invalid = "invalid"
 
 
 class ChannelAccountState(str, enum.Enum):
@@ -103,6 +121,9 @@ class User(Base):
     phone_links: Mapped[list["PhoneLink"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    channel_identities: Mapped[list["ChannelIdentity"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class ChannelAccount(Base):
@@ -165,6 +186,45 @@ class PhoneLink(Base):
     user: Mapped[User] = relationship(back_populates="phone_links")
 
 
+class ChannelIdentity(Base):
+    """An authenticated inbound principal and its outbound destination."""
+
+    __tablename__ = "channel_identities"
+    __table_args__ = (
+        Index("uq_channel_identities_channel_principal", "channel", "external_principal_id", unique=True),
+        Index(
+            "uq_channel_identities_user_default",
+            "user_id",
+            "channel",
+            unique=True,
+            postgresql_where=text("is_default = true AND status = 'linked'"),
+            sqlite_where=text("is_default = 1 AND status = 'linked'"),
+        ),
+        Index("ix_channel_identities_user_channel_status", "user_id", "channel", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    channel: Mapped[ChannelKind] = mapped_column(
+        Enum(ChannelKind, name="identity_channel_kind"), nullable=False
+    )
+    external_principal_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    external_destination_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    status: Mapped[ChannelIdentityStatus] = mapped_column(
+        Enum(ChannelIdentityStatus, name="channel_identity_status"),
+        default=ChannelIdentityStatus.linked,
+        nullable=False,
+    )
+    is_default: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    user: Mapped[User] = relationship(back_populates="channel_identities")
+
+
 class InboundEvent(Base):
     __tablename__ = "inbound_events"
     __table_args__ = (
@@ -176,6 +236,7 @@ class InboundEvent(Base):
         Enum(ChannelKind, name="inbound_channel_kind"), nullable=False
     )
     external_update_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    payload_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[InboundEventStatus] = mapped_column(
         Enum(InboundEventStatus, name="inbound_event_status"),
         default=InboundEventStatus.processing,
@@ -288,6 +349,66 @@ class ReminderOccurrence(Base):
     )
     reminder: Mapped[Reminder] = relationship(back_populates="occurrences")
     series_schedule: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    notification_deliveries: Mapped[list["NotificationDelivery"]] = relationship(
+        back_populates="occurrence", cascade="all, delete-orphan"
+    )
+
+
+class NotificationDelivery(Base):
+    """Durable delivery intent; network calls happen only after it is claimed."""
+
+    __tablename__ = "notification_deliveries"
+    __table_args__ = (
+        Index("ix_notification_deliveries_due", "status", "next_attempt_at"),
+        Index("ix_notification_deliveries_identity_status", "channel_identity_id", "status"),
+        Index("uq_notification_deliveries_occurrence_sequence", "occurrence_id", "delivery_sequence", unique=True),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    reminder_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("reminders.id", ondelete="CASCADE"), nullable=False)
+    occurrence_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("reminder_occurrences.id", ondelete="CASCADE"), nullable=False)
+    channel_identity_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("channel_identities.id", ondelete="SET NULL"), nullable=True)
+    destination_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("delivery_destinations.id", ondelete="SET NULL"), nullable=True)
+    channel: Mapped[DeliveryChannel] = mapped_column(Enum(DeliveryChannel, name="delivery_channel", create_type=False), nullable=False)
+    destination_snapshot: Mapped[str] = mapped_column(String(500), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    provider_idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    request_phone: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    delivery_sequence: Mapped[int] = mapped_column(default=1, nullable=False)
+    status: Mapped[NotificationStatus] = mapped_column(Enum(NotificationStatus, name="notification_status"), default=NotificationStatus.pending, nullable=False)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    uncertain_attempt_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    worker_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    reminder: Mapped[Reminder] = relationship()
+    occurrence: Mapped[ReminderOccurrence] = relationship(back_populates="notification_deliveries")
+    channel_identity: Mapped[ChannelIdentity | None] = relationship()
+    destination: Mapped[DeliveryDestination | None] = relationship()
+    attempts: Mapped[list["NotificationAttempt"]] = relationship(back_populates="notification", cascade="all, delete-orphan", order_by="NotificationAttempt.sequence")
+
+
+class NotificationAttempt(Base):
+    __tablename__ = "notification_attempts"
+    __table_args__ = (Index("uq_notification_attempts_sequence", "notification_id", "sequence", unique=True),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    notification_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("notification_deliveries.id", ondelete="CASCADE"), nullable=False)
+    sequence: Mapped[int] = mapped_column(nullable=False)
+    worker_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    classification: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    provider_reference: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    notification: Mapped[NotificationDelivery] = relationship(back_populates="attempts")
 
 
 class ReminderConversation(Base):
