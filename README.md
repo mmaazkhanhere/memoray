@@ -12,6 +12,17 @@ uv run alembic upgrade head
 uv run uvicorn app.api:app --reload
 ```
 
+Run the reminder delivery worker as a separate process/container:
+
+```powershell
+uv run reminder-worker
+```
+
+Reminder sends are persisted in PostgreSQL before their due time. The worker
+claims due rows with leased FOR UPDATE SKIP LOCKED transactions, sends outside
+the transaction, and conditionally records sent, failed, or unknown.
+Restarting the API or worker does not discard pending notifications.
+
 The agent exposes `POST /users/{user_id}/agent` and the underlying reminder operations are also available at `POST /users/{user_id}/reminders`, `GET /users/{user_id}/reminders`, `POST /users/{user_id}/reminders/{reminder_id}/reschedule`, `POST /users/{user_id}/reminders/{reminder_id}/cancel`, and `POST /users/{user_id}/reminders/{reminder_id}/occurrences/{occurrence_id}/snooze`.
 
 The agent can also save durable user facts as memories and retrieve them with pgvector cosine search. Memories have no
