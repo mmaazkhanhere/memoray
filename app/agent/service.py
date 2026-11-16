@@ -9,10 +9,11 @@ from pydantic import ValidationError
 
 from app.agent.tools import TOOLS
 from app.conversations.service import ConversationService
-from app.llm.protocol import LLMProvider
+from app.llm.protocol import LLMProvider, LLMResponse
 from app.memories.service import MemoryService
 from app.models import ConversationMessageRole, DraftStatus, RecurrenceFrequency
 from app.reminders.canceling import ReminderCanceler
+from app.reminders.completion import CompletionService
 from app.reminders.errors import DuplicateReminderError, ReminderInPastError
 from app.reminders.rescheduling import ReminderRescheduler
 from app.reminders.snoozing import ReminderSnoozer
@@ -35,6 +36,11 @@ SYSTEM_PROMPT = """You are Memoray, a reminder and memory assistant. You create,
 **Creation:** Require title, date, and time; recurring reminders also require frequency (daily, weekly, monthly, yearly)
 and optional interval. Use the draft tool for missing fields and `create_reminders` for multiple complete requests. Never
 invent values. Resolve relative times using the user's timezone and current time.
+
+**Completion:** When the user says Done, finished, or otherwise confirms a delivered reminder, call
+`complete_delivered_occurrence`. Include the reminder title when present. Complete only one delivered occurrence;
+if the tool reports ambiguity, ask for clarification and do not guess. Repeating the same completion is safe and should
+be reported as already completed.
 
 **Rescheduling/Snoozing:** `reschedule_reminder` is mutation-only; requires exact `reminder_id`, resolved future schedule,
 and scope. Never use it for discovery. Unless an exact ID is provided, first call `list_reminders` with relevant title
@@ -93,10 +99,14 @@ class ReminderAgent:
         user_id: uuid.UUID,
         message: str,
         conversation_id: uuid.UUID | None = None,
+        *,
+        commit: bool = True,
     ) -> AgentResult:
         user = self.users.get(user_id)
-        conversation = self.conversations.get_or_create(user_id, conversation_id)
-        self.conversations.record_message(conversation.id, ConversationMessageRole.user, message)
+        conversation = self.conversations.get_or_create(user_id, conversation_id, commit=commit)
+        self.conversations.record_message(
+            conversation.id, ConversationMessageRole.user, message, commit=commit
+        )
 
         history = self.conversations.recent_messages(conversation, limit=4)
         history = [
@@ -221,12 +231,20 @@ class ReminderAgent:
                                 mutation_attempted = True
                                 continue
                     mutation_attempted = True
-                result = self._execute_tool(user_id, conversation, call)
+                result = self._execute_tool(user_id, conversation, call, commit=commit)
                 last_tool_results.append(result)
                 if call.name == "retrieve_memories":
                     memory_retrieval_result = result
                 if call.name == "list_reminders" and mutation_workflow:
                     last_discovery_result = result
+            if any(
+                call.name == "complete_delivered_occurrence"
+                for call in response.tool_calls
+            ):
+                # Completion replies are deterministic and must not depend on
+                # a second model turn that could reinterpret the mutation.
+                final_response = LLMResponse(text="")
+                break
             final_context = {
                 "role": "user",
                 "content": (
@@ -267,18 +285,35 @@ class ReminderAgent:
                 [],
             )
             break
-        if final_response is None and memory_retrieval_result is None:
+        completion_results = [
+            result
+            for result in last_tool_results
+            if result.get("operation")
+            in {"completed", "already_completed", "ambiguous", "not_found", "not_delivered"}
+        ]
+        if final_response is None and memory_retrieval_result is None and not completion_results:
             raise RuntimeError("LLM did not return a final response after reminder tool calls")
-        if not final_response.text and memory_retrieval_result is None:
+        if (
+            final_response is not None
+            and not final_response.text
+            and memory_retrieval_result is None
+            and not completion_results
+        ):
             raise RuntimeError("LLM did not return a final response after the reminder tool call")
-        if memory_retrieval_result is not None:
+        if completion_results:
+            text = self._completion_response(completion_results[-1])
+        elif memory_retrieval_result is not None:
             text = self._ground_memory_response(memory_retrieval_result)
         else:
             grounded_text = self._ground_successful_mutation_response(
                 final_response.text, last_tool_results
             )
             text = self._redact_internal_ids(self._limit_words(grounded_text))
-        self.conversations.record_message(conversation.id, ConversationMessageRole.assistant, text)
+        self.conversations.record_message(
+            conversation.id, ConversationMessageRole.assistant, text, commit=commit
+        )
+        if commit:
+            self.reminders.db.commit()
         draft_operations = {"draft_updated", "draft_not_updated", "created", "created_batch", "not_created"}
         draft_status = (
             conversation.draft.status.value
@@ -287,17 +322,19 @@ class ReminderAgent:
         )
         return AgentResult(conversation.id, text, draft_status)
 
-    def _execute_tool(self, user_id: uuid.UUID, conversation, call) -> dict[str, Any]:
+    def _execute_tool(
+        self, user_id: uuid.UUID, conversation, call, *, commit: bool = True
+    ) -> dict[str, Any]:
         if call.name == "update_reminder_draft":
-            result = self._update_draft(conversation, call.arguments)
+            result = self._update_draft(conversation, call.arguments, commit=commit)
             if result.get("draft_status") == DraftStatus.ready.value:
-                return self._create_from_draft(user_id, conversation)
+                return self._create_from_draft(user_id, conversation, commit=commit)
             return result
         if call.name == "create_reminder":
-            self._update_draft(conversation, call.arguments)
-            return self._create_from_draft(user_id, conversation)
+            self._update_draft(conversation, call.arguments, commit=commit)
+            return self._create_from_draft(user_id, conversation, commit=commit)
         if call.name == "create_reminders":
-            return self._create_many(user_id, conversation, call.arguments)
+            return self._create_many(user_id, conversation, call.arguments, commit=commit)
         if call.name == "list_reminders":
             return self._list(user_id, call.arguments)
         if call.name == "reschedule_reminder":
@@ -306,6 +343,8 @@ class ReminderAgent:
             return self._cancel(user_id, call.arguments)
         if call.name == "snooze_occurrence":
             return self._snooze(user_id, call.arguments)
+        if call.name == "complete_delivered_occurrence":
+            return self._complete(user_id, call.arguments)
         if call.name == "create_memory":
             return self._create_memory(user_id, call.arguments)
         if call.name == "retrieve_memories":
@@ -359,7 +398,50 @@ class ReminderAgent:
             return f"I found multiple matching memories: {facts}. Which one did you mean?"
         return f"I remember: {candidates[0].get('content', '')}"
 
-    def _update_draft(self, conversation, arguments: dict[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def _completion_response(result: dict[str, Any]) -> str:
+        operation = result.get("operation")
+        title = result.get("title")
+        if operation == "completed":
+            return f"Done — I marked {title or 'that reminder'} as completed."
+        if operation == "already_completed":
+            return f"That reminder{f' ({title})' if title else ''} was already completed."
+        if operation == "ambiguous":
+            titles = result.get("titles") or []
+            suffix = f": {', '.join(titles)}" if titles else ""
+            return f"Which reminder should I mark as done{suffix}?"
+        if operation == "not_delivered":
+            return "I can only mark a reminder done after it has been delivered."
+        return "I couldn't find a single delivered reminder to mark done."
+
+    def _complete(self, user_id: uuid.UUID, arguments: dict[str, Any]) -> dict[str, Any]:
+        try:
+            occurrence_id = arguments.get("occurrence_id")
+            if occurrence_id:
+                result = CompletionService(self.reminders.db).complete_by_id(
+                    user_id, uuid.UUID(occurrence_id)
+                )
+            else:
+                result = CompletionService(self.reminders.db).complete_matching(
+                    user_id, title=arguments.get("title")
+                )
+        except (TypeError, ValueError, LookupError) as exc:
+            return {"operation": "not_found", "error": str(exc)}
+        if result.operation == "ambiguous":
+            return {
+                "operation": "ambiguous",
+                "count": len(result.matches),
+                "titles": [item[0].title for item in result.matches],
+            }
+        title = result.reminder.title if result.reminder else None
+        response = {"operation": result.operation, "title": title}
+        if result.occurrence is not None:
+            response["occurrence_id"] = str(result.occurrence.id)
+        return response
+
+    def _update_draft(
+        self, conversation, arguments: dict[str, Any], *, commit: bool = True
+    ) -> dict[str, Any]:
         try:
             schedule_date = date.fromisoformat(arguments["date"]) if arguments.get("date") else None
             schedule_time = time.fromisoformat(arguments["time"]) if arguments.get("time") else None
@@ -381,6 +463,7 @@ class ReminderAgent:
                 is_recurring=arguments.get("recurring"),
                 recurrence_frequency=frequency,
                 recurrence_interval=recurrence_interval,
+                commit=commit,
             )
         except (KeyError, TypeError, ValueError, ValidationError):
             return {"operation": "draft_not_updated", "error": "One or more supplied fields are invalid."}
@@ -510,7 +593,9 @@ class ReminderAgent:
             "reminder": to_response(reminder, user.timezone).model_dump(mode="json"),
         }
 
-    def _create_from_draft(self, user_id: uuid.UUID, conversation) -> dict[str, Any]:
+    def _create_from_draft(
+        self, user_id: uuid.UUID, conversation, *, commit: bool = True
+    ) -> dict[str, Any]:
         draft = conversation.draft
         missing = self.conversations.missing_fields(draft)
         if missing:
@@ -532,7 +617,7 @@ class ReminderAgent:
             return {"operation": "not_created", "error": "The reminder time must be strictly in the future."}
         except DuplicateReminderError:
             return {"operation": "not_created", "error": "An equivalent active reminder already exists."}
-        self.conversations.mark_created(draft, conversation)
+        self.conversations.mark_created(draft, conversation, commit=commit)
         user = self.users.get(user_id)
         return {
             "operation": "created",
@@ -540,7 +625,12 @@ class ReminderAgent:
         }
 
     def _create_many(
-        self, user_id: uuid.UUID, conversation, arguments: dict[str, Any]
+        self,
+        user_id: uuid.UUID,
+        conversation,
+        arguments: dict[str, Any],
+        *,
+        commit: bool = True,
     ) -> dict[str, Any]:
         created = []
         rejected = []
@@ -571,7 +661,9 @@ class ReminderAgent:
             except (ReminderInPastError, DuplicateReminderError) as exc:
                 rejected.append({"title": item.get("title"), "error": str(exc)})
         if created and conversation.draft:
-            self.conversations.mark_created(conversation.draft, conversation)
+            self.conversations.mark_created(
+                conversation.draft, conversation, commit=commit
+            )
         return {
             "operation": "created_batch",
             "created_count": len(created),

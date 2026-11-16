@@ -19,7 +19,6 @@ from app.models import (
 )
 from app.notifications.service import NotificationService
 from app.reminders.errors import DuplicateReminderError, ReminderInPastError
-from app.reminders.occurrences import advance_recurring_occurrence
 from app.reminders.destinations import DestinationService
 from app.recurrence.schedule import next_occurrence
 from app.schemas import ReminderCreate, ReminderListStatus, ReminderQuery
@@ -150,51 +149,22 @@ class ReminderService:
     def complete_occurrence(
         self, user_id: uuid.UUID, reminder_id: uuid.UUID, occurrence_id: uuid.UUID
     ) -> Reminder:
-        user = self.users.get(user_id)
-        reminder = self.db.scalar(
-            select(Reminder)
-            .options(selectinload(Reminder.occurrences))
-            .where(Reminder.id == reminder_id, Reminder.user_id == user_id)
-        )
-        if reminder is None:
-            raise LookupError("reminder not found")
-        occurrence = next((item for item in reminder.occurrences if item.id == occurrence_id), None)
-        if occurrence is None:
-            raise LookupError("occurrence not found")
-        if occurrence.status in {OccurrenceStatus.completed, OccurrenceStatus.canceled}:
-            raise ValueError("occurrence is no longer pending")
+        from app.reminders.completion import CompletionService
 
-        occurrence.status = OccurrenceStatus.completed
-        if reminder.is_recurring and reminder.recurrence_frequency:
-            next_record = advance_recurring_occurrence(reminder, occurrence, user.timezone)
-            reminder.schedule = next_record.schedule
-            identity = self.db.scalar(
-                select(ChannelIdentity)
-                .where(
-                    ChannelIdentity.user_id == user.id,
-                    ChannelIdentity.status == ChannelIdentityStatus.linked,
-                    ChannelIdentity.is_default.is_(True),
-                )
-                .order_by(ChannelIdentity.created_at.asc())
-            )
-            NotificationService(self.db).schedule(
-                reminder,
-                next_record,
-                content=f"Reminder: {reminder.title}",
-                identity=identity,
-                channel=None if identity else reminder.destination.channel if reminder.destination else None,
-                destination_id=reminder.destination_id,
-                destination_snapshot=(
-                    identity.external_destination_id
-                    if identity is not None
-                    else reminder.destination.identity if reminder.destination else None
-                ),
-            )
-        else:
-            reminder.status = ReminderStatus.completed
+        result = CompletionService(self.db).complete_by_id(
+            user_id, occurrence_id, require_delivered=False
+        )
+        if (
+            result.operation == "not_found"
+            or result.reminder is None
+            or result.reminder.id != reminder_id
+        ):
+            raise LookupError("reminder or occurrence not found")
+        if result.operation == "not_delivered":
+            raise ValueError("occurrence is no longer pending")
         self.db.commit()
-        self.db.refresh(reminder)
-        return reminder
+        self.db.refresh(result.reminder)
+        return result.reminder
 
     def reschedule(self, user_id: uuid.UUID, reminder_id: uuid.UUID, request):
         from app.reminders.rescheduling import ReminderRescheduler

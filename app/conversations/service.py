@@ -21,7 +21,9 @@ class ConversationService:
     def __init__(self, db: Session):
         self.db = db
 
-    def get_or_create(self, user_id: uuid.UUID, conversation_id: uuid.UUID | None) -> ReminderConversation:
+    def get_or_create(
+        self, user_id: uuid.UUID, conversation_id: uuid.UUID | None, *, commit: bool = True
+    ) -> ReminderConversation:
         if conversation_id:
             conversation = self.db.scalar(
                 select(ReminderConversation)
@@ -42,21 +44,37 @@ class ConversationService:
                 conversation.draft.recurrence_frequency = None
                 conversation.draft.recurrence_interval = 1
                 conversation.draft.status = DraftStatus.collecting
-            self.db.commit()
+            if commit:
+                self.db.commit()
+            else:
+                self.db.flush()
             return conversation
 
         conversation = ReminderConversation(user_id=user_id, status=ConversationStatus.active)
         conversation.draft = ReminderDraft(status=DraftStatus.collecting)
         self.db.add(conversation)
-        self.db.commit()
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
         self.db.refresh(conversation)
         return conversation
 
-    def record_message(self, conversation_id: uuid.UUID, role: ConversationMessageRole, content: str) -> None:
+    def record_message(
+        self,
+        conversation_id: uuid.UUID,
+        role: ConversationMessageRole,
+        content: str,
+        *,
+        commit: bool = True,
+    ) -> None:
         self.db.add(
             ReminderConversationMessage(conversation_id=conversation_id, role=role, content=content)
         )
-        self.db.commit()
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
 
     def recent_messages(self, conversation: ReminderConversation, limit: int = 12) -> list[dict[str, str]]:
         messages = conversation.messages[-limit:]
@@ -72,6 +90,7 @@ class ConversationService:
         is_recurring: bool | None = None,
         recurrence_frequency: RecurrenceFrequency | None = None,
         recurrence_interval: int | None = None,
+        commit: bool = True,
     ) -> ReminderDraft:
         if draft.status in {DraftStatus.created, DraftStatus.canceled}:
             draft.title = None
@@ -96,7 +115,10 @@ class ConversationService:
             draft.recurrence_interval = recurrence_interval
         draft.status = DraftStatus.ready if self.is_complete(draft) else DraftStatus.collecting
         self.db.add(draft)
-        self.db.commit()
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
         self.db.refresh(draft)
         return draft
 
@@ -122,8 +144,17 @@ class ConversationService:
             missing.append("recurrence_frequency")
         return missing
 
-    def mark_created(self, draft: ReminderDraft, conversation: ReminderConversation) -> None:
+    def mark_created(
+        self,
+        draft: ReminderDraft,
+        conversation: ReminderConversation,
+        *,
+        commit: bool = True,
+    ) -> None:
         draft.status = DraftStatus.created
         conversation.status = ConversationStatus.completed
-        self.db.commit()
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
 

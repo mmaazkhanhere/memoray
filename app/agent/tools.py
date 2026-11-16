@@ -218,6 +218,30 @@ SNOOZE_OCCURRENCE_TOOL = {
     },
 }
 
+COMPLETE_DELIVERED_OCCURRENCE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "complete_delivered_occurrence",
+        "description": (
+            "Mark exactly one reminder occurrence that has already been delivered as done. "
+            "Use the title when the user names a reminder; omit it for a bare Done only when "
+            "there is exactly one delivered occurrence. Never guess when multiple reminders match."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": _optional_string(),
+                "occurrence_id": _optional_string("uuid"),
+            },
+            "additionalProperties": False,
+        },
+    },
+}
+
+# Descriptive name used by the agent; retain the shorter alias for callers
+# that group occurrence mutation tools together.
+COMPLETE_OCCURRENCE_TOOL = COMPLETE_DELIVERED_OCCURRENCE_TOOL
+
 CREATE_MEMORY_TOOL = {
     "type": "function",
     "function": {
@@ -263,6 +287,7 @@ TOOLS = [
     RESCHEDULE_REMINDER_TOOL,
     CANCEL_REMINDER_TOOL,
     SNOOZE_OCCURRENCE_TOOL,
+    COMPLETE_DELIVERED_OCCURRENCE_TOOL,
     CREATE_MEMORY_TOOL,
     RETRIEVE_MEMORIES_TOOL,
 ]
