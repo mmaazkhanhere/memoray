@@ -42,3 +42,14 @@ Rescheduling separates discovery from mutation. The agent uses `list_reminders` 
 Cancellation is also discovery-first: the agent lists pending reminders, asks for clarification when targets or scope are ambiguous, and then calls the mutation-only `cancel_reminder` tool with exact IDs. `one_time` cancels a non-recurring reminder, `occurrence` skips one pending recurring occurrence while continuing the series, and `series` deactivates the entire recurring reminder.
 
 The agent uses a bounded sequence of LLM turns for discovery, mutation, and the final conversational response. Database writes and validation remain deterministic.
+
+## Telegram channel
+
+Telegram is an adapter around the channel-neutral onboarding and agent services. Configure
+`TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET`, then register Telegram's webhook URL as
+`https://<host>/webhooks/telegram` with the matching secret token header.
+
+The first `/start` creates one account for the Telegram sender and collects any missing name and IANA timezone.
+The user may share Telegram's native contact or skip phone linking. Phone linking is optional for Telegram use but
+required for future live-call delivery. Sender identity, phone ownership, and Telegram update IDs are protected by
+database constraints and idempotent processing; a Telegram sender can never resolve another sender's account.
