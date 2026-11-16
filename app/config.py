@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     memory_min_similarity: float = 0.75
     app_env: str = "development"
     auth_token_secret: str = "change-this-development-secret"
+    telegram_bot_token: str | None = None
+    telegram_webhook_secret: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
