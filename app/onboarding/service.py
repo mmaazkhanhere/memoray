@@ -27,9 +27,10 @@ class OnboardingResult:
 
 
 class OnboardingService:
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, calendar_service=None):
         self.db = db
         self.phones = PhoneService(db)
+        self.calendar_service = calendar_service
 
     def handle(self, account: ChannelAccount, message: IncomingMessage) -> OnboardingResult:
         if message.text and message.text.strip().casefold() == "/start":
@@ -44,9 +45,11 @@ class OnboardingService:
 
     def handle_completed(self, account: ChannelAccount, message: IncomingMessage) -> OnboardingResult:
         """Handle phone linking requested after onboarding has already completed."""
+        command = (message.text or "").strip().casefold()
+        if command in {"/connect_calendar", "/connect calendar"}:
+            return self._calendar_connect(account)
         if message.contact is not None:
             return self._phone_decision(account, message)
-        command = (message.text or "").strip().casefold()
         if command not in {"/link phone", "/link_phone", "/add phone", "/phone"}:
             return OnboardingResult(account, [], False)
         account.onboarding_state = ChannelAccountState.needs_phone_decision
@@ -144,6 +147,8 @@ class OnboardingService:
     def _phone_decision(
         self, account: ChannelAccount, message: IncomingMessage
     ) -> OnboardingResult:
+        if (message.text or "").strip().casefold() in {"/connect_calendar", "/connect calendar"}:
+            return self._calendar_connect(account)
         if message.contact is not None:
             try:
                 number = self.phones.normalize_contact(
@@ -167,7 +172,8 @@ class OnboardingService:
                 [
                     self._reply(
                         account,
-                        "No problem. You can use the agent here; live calls need a linked phone.",
+                        "No problem. You can use the agent here; live calls need a linked phone. "
+                        "Google Calendar is optional too—send /connect_calendar any time.",
                     )
                 ],
                 True,
@@ -177,7 +183,13 @@ class OnboardingService:
             self.db.flush()
             return OnboardingResult(
                 account,
-                [self._reply(account, "No problem. Phone linking remains optional.")],
+                [
+                    self._reply(
+                        account,
+                        "No problem. Phone linking remains optional. "
+                        "Google Calendar is optional too—send /connect_calendar any time.",
+                    )
+                ],
                 True,
             )
         candidate = (message.text or "").strip()
@@ -244,9 +256,22 @@ class OnboardingService:
             [
                 self._reply(
                     account,
-                    "Your phone is linked. You can now use the agent here and on live calls.",
+                    "Your phone is linked. You can now use the agent here and on live calls. "
+                    "Google Calendar is optional—send /connect_calendar any time.",
                 )
             ],
+            True,
+        )
+
+    def _calendar_connect(self, account: ChannelAccount) -> OnboardingResult:
+        service = self.calendar_service
+        if service is None:
+            from app.integrations.google_calendar.service import GoogleCalendarService
+
+            service = GoogleCalendarService(self.db)
+        return OnboardingResult(
+            account,
+            [self._reply(account, service.connect_command(account.user.id))],
             True,
         )
 
