@@ -20,6 +20,7 @@ from app.reminders.errors import (
     ReminderInPastError,
     ReminderNotActiveError,
 )
+from app.reminders.changes import queue_occurrence_changes
 from app.recurrence.schedule import next_occurrence
 from app.schemas import ReminderRescheduleRequest, RescheduleScope
 from app.time_utils import to_utc, to_user_timezone
@@ -138,6 +139,17 @@ class ReminderRescheduler:
                     identity.external_destination_id if identity is not None else destination.identity
                 ),
             )
+        queue_occurrence_changes(
+            self.db,
+            [
+                item.id
+                for item in (
+                    [occurrence]
+                    if scope == RescheduleScope.occurrence
+                    else [item for item in reminder.occurrences if item.status == OccurrenceStatus.pending]
+                )
+            ],
+        )
         self.db.commit()
         self.db.refresh(reminder)
         return reminder

@@ -72,6 +72,19 @@ class InboundEventStatus(str, enum.Enum):
     completed = "completed"
 
 
+class ReminderChangeStatus(str, enum.Enum):
+    pending = "pending"
+    sending = "sending"
+    completed = "completed"
+    failed = "failed"
+
+
+class GoogleCalendarConnectionStatus(str, enum.Enum):
+    active = "active"
+    reauthorization_required = "reauthorization_required"
+    revoked = "revoked"
+
+
 class RecurrenceFrequency(str, enum.Enum):
     daily = "daily"
     weekly = "weekly"
@@ -335,6 +348,107 @@ class OutboundMessage(Base):
     attempts: Mapped[int] = mapped_column(default=0, nullable=False)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ReminderChange(Base):
+    """Durable notification that an occurrence's external projections may be stale."""
+
+    __tablename__ = "reminder_changes"
+    __table_args__ = (
+        Index("ix_reminder_changes_due", "status", "next_attempt_at"),
+        Index("ix_reminder_changes_occurrence", "occurrence_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    occurrence_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("reminder_occurrences.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[ReminderChangeStatus] = mapped_column(
+        Enum(ReminderChangeStatus, name="reminder_change_status"),
+        default=ReminderChangeStatus.pending,
+        nullable=False,
+    )
+    attempt_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    worker_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    occurrence: Mapped["ReminderOccurrence"] = relationship()
+
+
+class GoogleCalendarConnection(Base):
+    """One optional Google Calendar authorization for a user."""
+
+    __tablename__ = "google_calendar_connections"
+    __table_args__ = (Index("uq_google_calendar_connections_user", "user_id", unique=True),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    calendar_id: Mapped[str] = mapped_column(String(500), default="primary", nullable=False)
+    google_subject: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    google_email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    encrypted_refresh_token: Mapped[str] = mapped_column(Text, nullable=False)
+    token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[GoogleCalendarConnectionStatus] = mapped_column(
+        Enum(GoogleCalendarConnectionStatus, name="google_calendar_connection_status"),
+        default=GoogleCalendarConnectionStatus.active,
+        nullable=False,
+    )
+    connected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    user: Mapped[User] = relationship()
+    events: Mapped[list["GoogleCalendarEvent"]] = relationship(
+        back_populates="connection", cascade="all, delete-orphan"
+    )
+
+
+class GoogleCalendarOAuthAttempt(Base):
+    """Single-use OAuth state bound to one authenticated Memoray user."""
+
+    __tablename__ = "google_calendar_oauth_attempts"
+    __table_args__ = (Index("uq_google_calendar_oauth_attempts_state", "state_hash", unique=True),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    state_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    code_verifier: Mapped[str] = mapped_column(String(200), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GoogleCalendarEvent(Base):
+    """Maps one reminder occurrence to its deterministic Google event ID."""
+
+    __tablename__ = "google_calendar_events"
+    __table_args__ = (
+        Index("uq_google_calendar_events_connection_occurrence", "connection_id", "occurrence_id", unique=True),
+        Index("uq_google_calendar_events_connection_external", "connection_id", "external_event_id", unique=True),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    connection_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("google_calendar_connections.id", ondelete="CASCADE"), nullable=False
+    )
+    occurrence_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("reminder_occurrences.id", ondelete="CASCADE"), nullable=False
+    )
+    external_event_id: Mapped[str] = mapped_column(String(1024), nullable=False)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    connection: Mapped[GoogleCalendarConnection] = relationship(back_populates="events")
+    occurrence: Mapped["ReminderOccurrence"] = relationship()
 
 
 class DeliveryDestination(Base):

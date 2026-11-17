@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.models import ChannelIdentity, ChannelIdentityStatus, OccurrenceStatus, Reminder, ReminderStatus
 from app.notifications.service import NotificationService
 from app.reminders.errors import OccurrenceNotNotifiedError, ReminderNotActiveError
+from app.reminders.changes import queue_occurrence_change
 from app.schemas import SnoozeRequest
 from app.users.service import UserService
 
@@ -70,6 +71,7 @@ class ReminderSnoozer:
                 else reminder.destination.identity if reminder.destination else None
             ),
         )
+        queue_occurrence_change(self.db, occurrence.id)
         self.db.commit()
         self.db.refresh(reminder)
         return reminder

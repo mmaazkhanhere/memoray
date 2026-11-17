@@ -9,6 +9,7 @@ from app.reminders.errors import (
     OccurrenceNotCancelableError,
     ReminderNotActiveError,
 )
+from app.reminders.changes import queue_occurrence_changes
 from app.reminders.occurrences import advance_recurring_occurrence
 from app.schemas import CancellationScope, ReminderCancelRequest
 from app.users.service import UserService
@@ -69,6 +70,14 @@ class ReminderCanceler:
         else:
             raise ValueError("unsupported cancellation scope")
 
+        self.db.flush()
+        queue_occurrence_changes(
+            self.db,
+            [item.id for item in reminder.occurrences if item.status in {
+                OccurrenceStatus.canceled,
+                OccurrenceStatus.pending,
+            }],
+        )
         self.db.commit()
         self.db.refresh(reminder)
         return reminder

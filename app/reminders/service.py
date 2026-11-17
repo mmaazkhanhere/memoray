@@ -19,6 +19,7 @@ from app.models import (
 )
 from app.notifications.service import NotificationService
 from app.reminders.errors import DuplicateReminderError, ReminderInPastError
+from app.reminders.changes import queue_occurrence_change
 from app.reminders.destinations import DestinationService
 from app.recurrence.schedule import next_occurrence
 from app.schemas import ReminderCreate, ReminderListStatus, ReminderQuery
@@ -130,6 +131,7 @@ class ReminderService:
                     else destination.identity
                 ),
             )
+            queue_occurrence_change(self.db, occurrence.id)
             self.db.commit()
         except IntegrityError as exc:
             self.db.rollback()

@@ -16,6 +16,7 @@ from app.models import (
 )
 from app.notifications.service import NotificationService
 from app.reminders.occurrences import advance_recurring_occurrence
+from app.reminders.changes import queue_occurrence_changes
 from app.users.service import UserService
 
 
@@ -98,6 +99,12 @@ class CompletionService:
             )
         else:
             reminder.status = ReminderStatus.completed
+
+        self.db.flush()
+        queue_occurrence_changes(
+            self.db,
+            [occurrence.id] + ([successor.id] if successor is not None else []),
+        )
 
         return CompletionResult("completed", reminder, occurrence, successor)
 
