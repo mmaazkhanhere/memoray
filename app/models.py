@@ -166,6 +166,7 @@ class ChannelAccount(Base):
     channel: Mapped[ChannelKind] = mapped_column(Enum(ChannelKind, name="channel_kind"), nullable=False)
     external_user_id: Mapped[str] = mapped_column(String(200), nullable=False)
     external_chat_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    pending_mcp_nonce: Mapped[str | None] = mapped_column(String(200), nullable=True)
     onboarding_state: Mapped[ChannelAccountState] = mapped_column(
         Enum(ChannelAccountState, name="channel_account_state"),
         default=ChannelAccountState.needs_timezone,
@@ -424,6 +425,88 @@ class GoogleCalendarOAuthAttempt(Base):
     code_verifier: Mapped[str] = mapped_column(String(200), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class McpLinkAttempt(Base):
+    """A short-lived Telegram approval for an MCP OAuth request."""
+
+    __tablename__ = "mcp_link_attempts"
+    __table_args__ = (Index("uq_mcp_link_attempts_nonce_hash", "nonce_hash", unique=True),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    nonce_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    client_id: Mapped[str] = mapped_column(String(500), nullable=False)
+    redirect_uri: Mapped[str] = mapped_column(String(2000), nullable=False)
+    state: Mapped[str] = mapped_column(String(2000), nullable=False)
+    code_challenge: Mapped[str] = mapped_column(String(200), nullable=False)
+    scope: Mapped[str] = mapped_column(String(500), nullable=False)
+    resource: Mapped[str] = mapped_column(String(2000), nullable=False)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    code_issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class McpAuthorizationCode(Base):
+    """Single-use OAuth authorization code; only its hash is persisted."""
+
+    __tablename__ = "mcp_authorization_codes"
+    __table_args__ = (Index("uq_mcp_authorization_codes_code_hash", "code_hash", unique=True),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    client_id: Mapped[str] = mapped_column(String(500), nullable=False)
+    redirect_uri: Mapped[str] = mapped_column(String(2000), nullable=False)
+    code_challenge: Mapped[str] = mapped_column(String(200), nullable=False)
+    scope: Mapped[str] = mapped_column(String(500), nullable=False)
+    resource: Mapped[str] = mapped_column(String(2000), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class McpRefreshToken(Base):
+    """Rotating refresh token; the bearer value is never stored."""
+
+    __tablename__ = "mcp_refresh_tokens"
+    __table_args__ = (Index("uq_mcp_refresh_tokens_token_hash", "token_hash", unique=True),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    client_id: Mapped[str] = mapped_column(String(500), nullable=False)
+    scope: Mapped[str] = mapped_column(String(500), nullable=False)
+    resource: Mapped[str] = mapped_column(String(2000), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class McpOperationReceipt(Base):
+    """Durable response cache for mutation retries from MCP clients."""
+
+    __tablename__ = "mcp_operation_receipts"
+    __table_args__ = (
+        Index(
+            "uq_mcp_operation_receipts_user_key",
+            "user_id",
+            "client_id",
+            "operation_key",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    client_id: Mapped[str] = mapped_column(String(500), nullable=False)
+    operation_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    arguments_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    result: Mapped[dict] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

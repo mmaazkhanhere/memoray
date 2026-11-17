@@ -45,11 +45,15 @@ from app.users.service import UserService
 from app.models import OccurrenceStatus, ReminderOccurrence, User
 from app.integrations.vapi.router import router as vapi_router
 from app.integrations.google_calendar.router import router as google_calendar_router
+from app.mcp.auth.routes import router as mcp_auth_router
+from app.mcp.transport import router as mcp_router
 
 app = FastAPI(title="Memoray Reminder and Memory Agent", version="0.1.0")
 configure_logging()
 app.include_router(vapi_router)
 app.include_router(google_calendar_router)
+app.include_router(mcp_auth_router)
+app.include_router(mcp_router)
 
 
 @app.get("/health")

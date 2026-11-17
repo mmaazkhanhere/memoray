@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
     auth_token_secret: str = "change-this-development-secret"
     telegram_bot_token: str | None = None
+    telegram_bot_username: str | None = None
     telegram_webhook_secret: str | None = None
     vapi_webhook_secret: str | None = None
     vapi_assistant_id: str | None = None
@@ -43,6 +44,13 @@ class Settings(BaseSettings):
     google_calendar_worker_id: str = "google-calendar-worker"
     google_calendar_job_lease_seconds: int = Field(default=120, gt=0)
     google_calendar_oauth_state_ttl_seconds: int = Field(default=600, gt=0)
+    mcp_enabled: bool = False
+    mcp_public_url: str = "http://localhost:8000"
+    mcp_issuer: str | None = None
+    mcp_token_secret: str = "change-this-development-mcp-secret"
+    mcp_access_token_ttl_seconds: int = Field(default=3600, gt=0)
+    mcp_refresh_token_ttl_seconds: int = Field(default=2592000, gt=0)
+    mcp_link_ttl_seconds: int = Field(default=600, gt=0)
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
