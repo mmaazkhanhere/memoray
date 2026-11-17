@@ -129,6 +129,17 @@ and inspect the API process logs alongside the Vapi Dashboard **Webhook logs**. 
 Vapi did not reach this deployment: check the phone number's Server URL, custom Bearer credential, public HTTPS
 reachability, and the selected Vapi project.
 
+## Remote MCP plugin
+
+Memoray exposes the same canonical reminder and memory store as an authenticated MCP server. Set
+`MCP_ENABLED=true`, configure `MCP_PUBLIC_URL` to the public HTTPS origin, set a unique `MCP_TOKEN_SECRET`, and
+configure `TELEGRAM_BOT_USERNAME`. The MCP endpoint is `/mcp` (with an SSE-compatible `/mcp/sse` transport).
+
+The first ChatGPT connection opens an OAuth page that asks the user to approve the connection from their existing
+Telegram account. MCP never accepts a user ID from the client; the OAuth token identifies the linked Memoray user.
+Reminder mutations require exact IDs and use the linked Telegram identity for notification delivery. Google Calendar
+is not required: reminder changes remain durable in Memoray and are projected only when a calendar connection exists.
+
 `VAPI_VOICE_PROVIDER` and `VAPI_VOICE_ID` are used when synchronizing Riley from the repository. The request deadline
 defaults to six seconds.
 
