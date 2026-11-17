@@ -24,6 +24,16 @@ class Settings(BaseSettings):
     auth_token_secret: str = "change-this-development-secret"
     telegram_bot_token: str | None = None
     telegram_webhook_secret: str | None = None
+    vapi_webhook_secret: str | None = None
+    vapi_assistant_id: str | None = None
+    vapi_api_key: str | None = None
+    vapi_server_url: str | None = None
+    vapi_credential_id: str | None = None
+    vapi_voice_provider: str | None = None
+    vapi_voice_id: str | None = None
+    vapi_voice_model: str | None = None
+    vapi_assistant_response_mode: str = "message_response"
+    vapi_assistant_request_deadline_seconds: float = 6.0
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

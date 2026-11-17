@@ -28,6 +28,7 @@ build-backend = "hatchling.build"
 
 [project.scripts]
 reminder-worker = "app.notifications.worker:main"
+sync-vapi-assistant = "app.integrations.vapi.sync:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
