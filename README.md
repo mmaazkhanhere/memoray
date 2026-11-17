@@ -54,6 +54,28 @@ Cancellation is also discovery-first: the agent lists pending reminders, asks fo
 
 The agent uses a bounded sequence of LLM turns for discovery, mutation, and the final conversational response. Database writes and validation remain deterministic.
 
+## Optional Google Calendar integration
+
+Google Calendar is an optional outbound projection of reminder occurrences. Configure
+`GOOGLE_CALENDAR_CLIENT_ID`, `GOOGLE_CALENDAR_CLIENT_SECRET`,
+`GOOGLE_CALENDAR_REDIRECT_URI` (for example,
+`https://your-host/integrations/google-calendar/oauth/callback`), and a Fernet
+`GOOGLE_CALENDAR_TOKEN_ENCRYPTION_KEY`, then run `uv run alembic upgrade head`.
+The Telegram command `/connect_calendar` (also available through the authenticated
+connect endpoint) starts Google OAuth. Users can skip it and continue using every
+reminder operation normally.
+
+Reminder changes are written to a durable outbox and synchronized by the existing reminder worker:
+
+```powershell
+uv run reminder-worker
+```
+
+The integration creates one timed Calendar event per active reminder occurrence. Create,
+reschedule, snooze, cancel, and done operations are projected asynchronously. Calendar
+events use a 15-minute default duration configured by
+`GOOGLE_CALENDAR_EVENT_DURATION_MINUTES`; Memoray remains the source of truth.
+
 ## Telegram channel
 
 Telegram is an adapter around the channel-neutral onboarding and agent services. Configure
