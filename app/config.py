@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -34,6 +35,14 @@ class Settings(BaseSettings):
     vapi_voice_model: str | None = None
     vapi_assistant_response_mode: str = "message_response"
     vapi_assistant_request_deadline_seconds: float = 6.0
+    google_calendar_client_id: str | None = None
+    google_calendar_client_secret: str | None = None
+    google_calendar_redirect_uri: str | None = None
+    google_calendar_token_encryption_key: str | None = None
+    google_calendar_event_duration_minutes: int = Field(default=15, gt=0, le=1440)
+    google_calendar_worker_id: str = "google-calendar-worker"
+    google_calendar_job_lease_seconds: int = Field(default=120, gt=0)
+    google_calendar_oauth_state_ttl_seconds: int = Field(default=600, gt=0)
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
