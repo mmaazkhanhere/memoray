@@ -1,0 +1,302 @@
+from __future__ import annotations
+
+import hmac
+import json
+import logging
+import time
+from datetime import datetime, timezone
+from typing import Any
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi.routing import APIRoute
+from starlette.responses import Response
+from sqlalchemy.orm import Session
+
+from app.config import get_settings
+from app.db import get_db
+from app.integrations.vapi.service import VapiAuthenticationError, VapiCallService
+from app.time_utils import to_user_timezone
+
+logger = logging.getLogger(__name__)
+
+
+class VapiDiagnosticRoute(APIRoute):
+    """Temporarily expose request arrival and outcome without logging payloads."""
+
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def diagnostic_handler(request: Request) -> Response:
+            started = time.monotonic()
+            arrival_time = datetime.now(timezone.utc).isoformat()
+            message_type: str | None = None
+            status_code = 500
+            _log_event(
+                logging.INFO,
+                "request_started",
+                arrival_time=arrival_time,
+                method=request.method,
+                path=request.url.path,
+            )
+            try:
+                # Request.body() is cached by Starlette, so the endpoint's
+                # existing request.json() call receives the same body.
+                raw_body = await request.body()
+                try:
+                    parsed = json.loads(raw_body)
+                    if isinstance(parsed, dict):
+                        message = parsed.get("message")
+                        if isinstance(message, dict) and isinstance(message.get("type"), str):
+                            message_type = message["type"]
+                        elif isinstance(parsed.get("type"), str):
+                            message_type = parsed["type"]
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    pass
+                response = await handler(request)
+                status_code = response.status_code
+                return response
+            except HTTPException as exc:
+                status_code = exc.status_code
+                raise
+            finally:
+                _log_event(
+                    logging.INFO,
+                    "request_completed",
+                    arrival_time=arrival_time,
+                    message_type=message_type,
+                    status_code=status_code,
+                    duration_ms=round((time.monotonic() - started) * 1000),
+                )
+
+        return diagnostic_handler
+
+
+router = APIRouter(route_class=VapiDiagnosticRoute)
+
+
+def _call_id(call: dict[str, Any] | None) -> str:
+    """Return an opaque identifier suitable for correlating application logs."""
+    if not call:
+        return "missing"
+    return str(call.get("id") or "missing")
+
+
+def _log_event(level: int, event: str, **context: Any) -> None:
+    """Log Vapi lifecycle events without recording secrets or call content."""
+    logger.log(level, "vapi.%s %s", event, context)
+
+
+def _call_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    message = payload.get("message") if isinstance(payload.get("message"), dict) else payload
+    call = message.get("call") if isinstance(message.get("call"), dict) else payload.get("call")
+    if not isinstance(call, dict):
+        raise ValueError("Vapi call is required")
+    return message, call
+
+
+def _caller_number(call: dict[str, Any]) -> str | None:
+    from_data = call.get("from")
+    if isinstance(from_data, dict) and from_data.get("phoneNumber"):
+        return str(from_data["phoneNumber"])
+    customer = call.get("customer")
+    if isinstance(customer, dict) and customer.get("number"):
+        return str(customer["number"])
+    return None
+
+
+def _assistant_error(message: str) -> dict[str, Any]:
+    return _message_response({"error": message})
+
+
+def _message_response(payload: dict[str, Any]) -> dict[str, Any]:
+    """Wrap a Vapi Server Message response in the required response envelope."""
+    return {"messageResponse": payload}
+
+
+def _assistant_response(call, settings):
+    assistant_id = settings.vapi_assistant_id
+    if not assistant_id:
+        raise ValueError("VAPI_ASSISTANT_ID is not configured")
+    timezone_name = call.user.timezone or "UTC"
+    current_local_time = to_user_timezone(datetime.now(timezone.utc), timezone_name)
+    response = {
+        "assistantId": assistant_id,
+        "assistantOverrides": {
+            "variableValues": {
+                "user_name": call.user.name or "there",
+                "user_timezone": timezone_name,
+                "current_local_time": current_local_time.isoformat(),
+            }
+        },
+    }
+    _log_event(
+        logging.INFO,
+        "assistant_response_sent",
+        response_keys=sorted(response),
+        assistant_id=assistant_id,
+        user_timezone=timezone_name,
+    )
+    return response
+
+
+def _tool_calls(message: dict[str, Any]) -> list[dict[str, Any]]:
+    calls = message.get("toolCallList") or []
+    if not calls and isinstance(message.get("toolWithToolCallList"), list):
+        calls = [item.get("toolCall") for item in message["toolWithToolCallList"]]
+    if not isinstance(calls, list):
+        raise ValueError("Vapi tool calls are invalid")
+    return [item for item in calls if isinstance(item, dict)]
+
+
+def _parse_arguments(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        parsed = json.loads(value)
+        if isinstance(parsed, dict):
+            return parsed
+    raise ValueError("Vapi tool arguments are invalid")
+
+
+@router.post("/webhooks/vapi")
+async def vapi_webhook(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    started = time.monotonic()
+    settings = get_settings()
+    expected = settings.vapi_webhook_secret
+    if not expected or not authorization:
+        _log_event(logging.WARNING, "credential_rejected", reason="missing")
+        raise HTTPException(status_code=401, detail="invalid Vapi webhook credential")
+    scheme, _, supplied = authorization.partition(" ")
+    if scheme.casefold() != "bearer":
+        _log_event(logging.WARNING, "credential_rejected", reason="scheme")
+        raise HTTPException(status_code=401, detail="invalid Vapi webhook credential")
+    supplied = supplied.strip()
+    if not supplied or not hmac.compare_digest(supplied, expected):
+        _log_event(logging.WARNING, "credential_rejected", reason="mismatch")
+        raise HTTPException(status_code=401, detail="invalid Vapi webhook credential")
+    try:
+        payload = await request.json()
+    except ValueError as exc:
+        _log_event(logging.WARNING, "payload_rejected", reason="invalid_json")
+        raise HTTPException(status_code=400, detail="invalid Vapi JSON payload") from exc
+    if not isinstance(payload, dict):
+        _log_event(logging.WARNING, "payload_rejected", reason="not_object")
+        raise HTTPException(status_code=400, detail="invalid Vapi payload")
+
+    message: dict[str, Any] = payload
+    try:
+        message, call_data = _call_payload(payload)
+        message_type = message.get("type")
+        call_id = str(call_data.get("id") or "")
+        log_call_id = _call_id(call_data)
+        _log_event(logging.INFO, "received", type=message_type, call_id=log_call_id)
+        service = VapiCallService(db)
+        if message_type == "assistant-request":
+            number = _caller_number(call_data)
+            if not number:
+                _log_event(logging.WARNING, "assistant_rejected", call_id=log_call_id, reason="missing_caller")
+                return _assistant_error(
+                    "Please call from the phone number linked to your Memoray account."
+                )
+            try:
+                session = service.authenticate_caller(call_id, number)
+            except VapiAuthenticationError as exc:
+                _log_event(logging.WARNING, "assistant_rejected", call_id=log_call_id, reason=str(exc))
+                return _assistant_error(str(exc))
+            if time.monotonic() - started > settings.vapi_assistant_request_deadline_seconds:
+                _log_event(logging.ERROR, "assistant_rejected", call_id=log_call_id, reason="deadline")
+                return _assistant_error("Memoray could not verify this call in time.")
+            _log_event(
+                logging.INFO,
+                "assistant_selected",
+                call_id=log_call_id,
+                elapsed_ms=round((time.monotonic() - started) * 1000),
+            )
+            return _assistant_response(session, settings)
+
+        if message_type == "tool-calls":
+            if not call_id:
+                _log_event(logging.WARNING, "tool_calls_rejected", reason="missing_call_id")
+                return _message_response({"results": []})
+            try:
+                session = service.authenticated_call(call_id, _caller_number(call_data))
+            except VapiAuthenticationError as exc:
+                _log_event(logging.WARNING, "tool_calls_rejected", call_id=log_call_id, reason=str(exc))
+                return _message_response({"results": []})
+            results = []
+            for item in _tool_calls(message):
+                function = item.get("function") if isinstance(item.get("function"), dict) else {}
+                tool_call_id = str(item.get("id") or "")
+                name = str(function.get("name") or "")
+                if not tool_call_id or not name:
+                    continue
+                try:
+                    arguments = _parse_arguments(function.get("arguments", {}))
+                    result = service.execute_tool(
+                        session,
+                        tool_call_id=tool_call_id,
+                        name=name,
+                        arguments=arguments,
+                    )
+                except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+                    result = {"operation": "failed", "error": str(exc)}
+                _log_event(
+                    logging.INFO,
+                    "tool_completed",
+                    call_id=log_call_id,
+                    tool=name,
+                    tool_call_id=tool_call_id,
+                    operation=result.get("operation"),
+                )
+                results.append(
+                    {
+                        "name": name,
+                        "toolCallId": tool_call_id,
+                        "result": json.dumps(result, separators=(",", ":")),
+                    }
+                )
+            return _message_response({"results": results})
+
+        if message_type == "status-update":
+            _log_event(
+                logging.INFO,
+                "status_updated",
+                call_id=log_call_id,
+                status=message.get("status") or call_data.get("status"),
+                ended_reason=message.get("endedReason") or call_data.get("endedReason"),
+                error=message.get("error") if isinstance(message.get("error"), str) else None,
+            )
+        elif message_type == "assistant.started":
+            _log_event(logging.INFO, "assistant_started", call_id=log_call_id)
+        elif message_type == "end-of-call-report":
+            service.end_call(call_id)
+            _log_event(
+                logging.INFO,
+                "ended",
+                call_id=log_call_id,
+                ended_reason=message.get("endedReason") or call_data.get("endedReason"),
+                has_artifact=isinstance(message.get("artifact"), dict),
+                has_transcript=bool(message.get("artifact", {}).get("transcript"))
+                if isinstance(message.get("artifact"), dict)
+                else False,
+            )
+        else:
+            _log_event(logging.INFO, "ignored", type=message_type, call_id=log_call_id)
+        return {}
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "vapi.handler_failed type=%s call_id=%s elapsed_ms=%s",
+            message.get("type"),
+            _call_id(message.get("call") if isinstance(message.get("call"), dict) else None),
+            round((time.monotonic() - started) * 1000),
+        )
+        if message.get("type") == "assistant-request":
+            return _assistant_error("Memoray could not verify this call.")
+        if message.get("type") == "tool-calls":
+            return _message_response({"results": []})
+        return {}

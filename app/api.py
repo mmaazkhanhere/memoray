@@ -43,9 +43,11 @@ from app.schemas import (
 )
 from app.users.service import UserService
 from app.models import OccurrenceStatus, ReminderOccurrence, User
+from app.integrations.vapi.router import router as vapi_router
 
 app = FastAPI(title="Memoray Reminder and Memory Agent", version="0.1.0")
 configure_logging()
+app.include_router(vapi_router)
 
 
 @app.get("/health")

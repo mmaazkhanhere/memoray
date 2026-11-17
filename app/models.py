@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import date, datetime, time
 
-from sqlalchemy import Boolean, Date, DateTime, Enum, ForeignKey, Index, String, Text, Time, func, text
+from sqlalchemy import JSON, Boolean, Date, DateTime, Enum, ForeignKey, Index, String, Text, Time, func, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -53,6 +53,11 @@ class ChannelIdentityStatus(str, enum.Enum):
     linked = "linked"
     unlinked = "unlinked"
     invalid = "invalid"
+
+
+class VapiCallStatus(str, enum.Enum):
+    active = "active"
+    ended = "ended"
 
 
 class ChannelAccountState(str, enum.Enum):
@@ -122,6 +127,9 @@ class User(Base):
         back_populates="user", cascade="all, delete-orphan"
     )
     channel_identities: Mapped[list["ChannelIdentity"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    vapi_calls: Mapped[list["VapiCall"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
 
@@ -223,6 +231,69 @@ class ChannelIdentity(Base):
     )
 
     user: Mapped[User] = relationship(back_populates="channel_identities")
+
+
+class VapiCall(Base):
+    """Authenticated state for one inbound Vapi call."""
+
+    __tablename__ = "vapi_calls"
+    __table_args__ = (
+        Index("uq_vapi_calls_external_id", "external_call_id", unique=True),
+        Index("ix_vapi_calls_user_status", "user_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    external_call_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    caller_e164: Mapped[str] = mapped_column(String(32), nullable=False)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("reminder_conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[VapiCallStatus] = mapped_column(
+        Enum(VapiCallStatus, name="vapi_call_status"), default=VapiCallStatus.active, nullable=False
+    )
+    last_reminder_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("reminders.id", ondelete="SET NULL"), nullable=True
+    )
+    last_occurrence_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("reminder_occurrences.id", ondelete="SET NULL"), nullable=True
+    )
+    target_ambiguous: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped[User] = relationship(back_populates="vapi_calls")
+
+
+class VapiToolExecution(Base):
+    """Cached result for a Vapi function call, making provider retries safe."""
+
+    __tablename__ = "vapi_tool_executions"
+    __table_args__ = (
+        Index(
+            "uq_vapi_tool_executions_call_tool",
+            "vapi_call_id",
+            "external_tool_call_id",
+            unique=True,
+        ),
+        Index("ix_vapi_tool_executions_call_created", "vapi_call_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    vapi_call_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("vapi_calls.id", ondelete="CASCADE"), nullable=False
+    )
+    external_tool_call_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    arguments_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    result: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    call: Mapped[VapiCall] = relationship()
 
 
 class InboundEvent(Base):
