@@ -64,6 +64,8 @@ The first `/start` creates one account for the Telegram sender and collects any 
 The user may share Telegram's native contact or skip phone linking. Phone linking is optional for Telegram use but
 required for future live-call delivery. Sender identity, phone ownership, and Telegram update IDs are protected by
 database constraints and idempotent processing; a Telegram sender can never resolve another sender's account.
+If phone linking is skipped, the user can later send `/link phone` and share Telegram's contact, or share the contact
+directly. Sending `/cancel` while the link prompt is active leaves phone linking disabled.
 
 Telegram voice notes are validated, downloaded through the Telegram Bot API, and transcribed through the configured
 provider-neutral speech-to-text interface. Groq Whisper is the default adapter (`STT_PROVIDER=groq` and
@@ -72,3 +74,61 @@ message. Empty or failed transcription produces a text retry response and does n
 The Telegram update ID is claimed before media or STT work, so replaying a voice update does not download, transcribe,
 or execute it again. Voice command replies are sent synchronously as Telegram text; scheduled reminder delivery
 remains the responsibility of the separate notification worker.
+
+## Vapi phone channel
+
+Vapi is an adapter over the same reminder and memory services. Configure the required `VAPI_WEBHOOK_SECRET`, run
+`uv run alembic upgrade head`, and configure the Vapi phone number with:
+
+```text
+https://<host>/webhooks/vapi
+```
+
+Attach a Vapi custom Bearer credential containing `VAPI_WEBHOOK_SECRET`. The number must use an
+`assistant-request` flow. Memoray authenticates the incoming E.164 caller against an active linked phone identity,
+then returns the configured Riley assistant ID. Missing, unknown, inactive, malformed, or failed identity lookups
+fail closed and never start the AI conversation. Assistant selection performs only a local, indexed lookup within
+Vapi's fixed 7.5-second assistant-request deadline.
+
+The authenticated `assistant-request` selects the saved Riley assistant configured by `VAPI_ASSISTANT_ID` and sends
+per-call `assistantOverrides.variableValues` for `user_name`, `user_timezone`, and `current_local_time`. Use these
+variables in Riley's prompt as `{{user_name}}`, `{{user_timezone}}`, and `{{current_local_time}}`. Riley's saved prompt,
+voice, and function schemas remain managed in Vapi (or synchronized explicitly from the repository). Its tool calls
+are sent to the same `/webhooks/vapi` endpoint. A
+Vapi call gets one durable conversation and one tool-result cache, so Vapi retries cannot create a second reminder.
+Call-created reminders require a linked Telegram identity and are scheduled through the existing Telegram notification
+worker. The call context stores an unambiguous current reminder, allowing a correction such as “make it half an hour”
+to reschedule the same reminder; ambiguous targets are rejected for clarification. Memory writes and retrieval remain
+user-scoped and immediately available to Telegram and phone channels.
+
+The API logs Vapi lifecycle events as `vapi.*` (request receipt, assistant selection/rejection, tool result, and end
+report) without logging authorization headers, phone numbers, transcripts, or tool arguments. Set `LOG_LEVEL=INFO`
+and inspect the API process logs alongside the Vapi Dashboard **Webhook logs**. If no `vapi.received` line appears,
+Vapi did not reach this deployment: check the phone number's Server URL, custom Bearer credential, public HTTPS
+reachability, and the selected Vapi project.
+
+`VAPI_VOICE_PROVIDER` and `VAPI_VOICE_ID` are used when synchronizing Riley from the repository. The request deadline
+defaults to six seconds.
+
+### Sync Riley from the repository
+
+Use the explicit sync command after changing the shared agent tools or prompt. It updates Riley through Vapi's
+Assistant API; it does not run automatically when the app starts.
+
+```powershell
+$env:VAPI_API_KEY = "your-vapi-private-api-key"
+$env:VAPI_ASSISTANT_ID = "your-riley-assistant-id"
+uv run sync-vapi-assistant
+```
+
+To also set the assistant-level server configuration, provide the public webhook URL and the ID of the existing
+Vapi custom credential:
+
+```powershell
+$env:VAPI_SERVER_URL = "https://your-host.example/webhooks/vapi"
+$env:VAPI_CREDENTIAL_ID = "your-vapi-credential-id"
+uv run sync-vapi-assistant
+```
+
+Without those optional variables, the command leaves Riley's current server URL and credential untouched while
+replacing its prompt, first message, voice settings, and all Memoray function schemas.
