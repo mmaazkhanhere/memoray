@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from app.db import SessionLocal
-from app.models import DeliveryChannel, NotificationDelivery
+from app.models import DeliveryChannel, NotificationDelivery, NotificationStatus
 from app.notifications.service import NotificationService
 from app.integrations.telegram.adapter import (
     TelegramBotClient,
@@ -95,6 +95,11 @@ class NotificationWorker:
             try:
                 row = send_db.get(NotificationDelivery, notification_id)
                 if row is None:
+                    continue
+                # A reschedule/cancel can invalidate a claimed notification
+                # before the provider call. Never send an intent that has
+                # already been canceled by the mutation transaction.
+                if row.status != NotificationStatus.sending:
                     continue
                 adapter = self.adapters.get(channel)
                 if adapter is None:
