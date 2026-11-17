@@ -13,6 +13,7 @@ from app.integrations.telegram.adapter import (
     TelegramBotClient,
     TelegramDeliveryError,
 )
+from app.integrations.google_calendar.worker import GoogleCalendarWorker
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +127,12 @@ class NotificationWorker:
                 )
             finally:
                 send_db.close()
-        return len(claimed_data)
+        calendar_db = self.session_factory()
+        try:
+            calendar_processed = GoogleCalendarWorker(calendar_db).run_once()
+        finally:
+            calendar_db.close()
+        return len(claimed_data) + calendar_processed
 
     def _finalize(self, db, notification_id, exc, classification: str | None = None) -> None:
         error = str(exc)
