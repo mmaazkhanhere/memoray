@@ -154,9 +154,11 @@ RESCHEDULE_REMINDER_TOOL = {
         "name": "reschedule_reminder",
         "description": (
             "Mutation only: move one already-resolved active reminder to a strictly future time. "
-            "The exact reminder_id is required; never use this tool to search by title. Use "
-            "scope=occurrence for one pending occurrence and scope=series only when changing the "
-            "entire recurring schedule. occurrence_id is required for occurrence scope."
+            "The exact reminder_id is required; never use this tool to search by title. Always "
+            "call list_reminders with the caller's title first when the exact ID is not already "
+            "known. For a non-recurring reminder, use scope=series. For a recurring reminder, "
+            "use scope=occurrence with occurrence_id for one pending occurrence, or scope=series "
+            "only when changing the entire recurring schedule."
         ),
         "parameters": {
             "type": "object",
@@ -167,7 +169,7 @@ RESCHEDULE_REMINDER_TOOL = {
                 "scope": {
                     "type": "string",
                     "enum": ["series", "occurrence"],
-                    "description": "Use occurrence for a named date such as today/tomorrow; use series only when explicitly requested.",
+                    "description": "Use series for non-recurring reminders or an entire recurring series. Use occurrence only for one recurring occurrence.",
                 },
             },
             "required": ["reminder_id", "schedule", "scope"],

@@ -11,7 +11,7 @@ from app.agent.tools import TOOLS
 from app.conversations.service import ConversationService
 from app.llm.protocol import LLMProvider, LLMResponse
 from app.memories.service import MemoryService
-from app.models import ConversationMessageRole, DraftStatus, RecurrenceFrequency
+from app.models import ChannelIdentity, ConversationMessageRole, DraftStatus, RecurrenceFrequency
 from app.reminders.canceling import ReminderCanceler
 from app.reminders.completion import CompletionService
 from app.reminders.errors import DuplicateReminderError, ReminderInPastError
@@ -45,8 +45,8 @@ be reported as already completed.
 **Rescheduling/Snoozing:** `reschedule_reminder` is mutation-only; requires exact `reminder_id`, resolved future schedule,
 and scope. Never use it for discovery. Unless an exact ID is provided, first call `list_reminders` with relevant title
 substring and `status=pending`; if not uniquely identified, retry once without title. Never mutate ambiguous matches. For
-recurring reminders, use `scope=occurrence` with exact pending `occurrence_id` for a specific date; use `scope=series` only
-for explicit series-wide changes. Clarify ambiguity. Snoozing requires a delivered occurrence and positive duration.
+recurring reminders, use `scope=occurrence` with exact pending `occurrence_id` for a specific date; use `scope=series` for
+a non-recurring reminder or for explicit series-wide changes. Clarify ambiguity. Snoozing requires a delivered occurrence and positive duration.
 
 **Cancellation:** `cancel_reminder` is mutation-only. Always discover the exact `reminder_id` via `list_reminders`, first
 filtering by title and `status=pending`, then at most once without title. Use `scope=one_time` for non-recurring reminders,
@@ -87,12 +87,14 @@ class ReminderAgent:
         user_service: UserService,
         conversation_service: ConversationService,
         memory_service: MemoryService | None = None,
+        notification_identity: ChannelIdentity | None = None,
     ):
         self.provider = provider
         self.reminders = reminder_service
         self.users = user_service
         self.conversations = conversation_service
         self.memories = memory_service
+        self.notification_identity = notification_identity
 
     def handle(
         self,
@@ -263,6 +265,14 @@ class ReminderAgent:
                     discovery_calls == 1 and discovery_result.get("count") == 0
                 ):
                     continue
+            # A model may use an empty discovery result as a planning step
+            # before creating a newly requested reminder. Give it another
+            # tool-enabled turn instead of treating the next tool call as a
+            # final text response.
+            if any(call.name == "list_reminders" for call in response.tool_calls):
+                discovery_result = last_tool_results[-1] if last_tool_results else {}
+                if discovery_result.get("operation") == "retrieved" and discovery_result.get("count") == 0:
+                    continue
             redacted_final_context = {
                 **working_messages[-1],
                 "content": self._redact_internal_ids(working_messages[-1]["content"]),
@@ -350,6 +360,12 @@ class ReminderAgent:
         if call.name == "retrieve_memories":
             return self._retrieve_memories(user_id, call.arguments)
         return {"operation": "rejected", "error": "unsupported reminder operation"}
+
+    def execute_tool(
+        self, user_id: uuid.UUID, conversation, call, *, commit: bool = True
+    ) -> dict[str, Any]:
+        """Execute one deterministic tool for a channel adapter."""
+        return self._execute_tool(user_id, conversation, call, commit=commit)
 
     def _create_memory(self, user_id: uuid.UUID, arguments: dict[str, Any]) -> dict[str, Any]:
         if self.memories is None:
@@ -496,7 +512,10 @@ class ReminderAgent:
                 else None,
             )
             reminder = ReminderRescheduler(self.reminders.db).reschedule(
-                user_id, uuid.UUID(reminder_id), request
+                user_id,
+                uuid.UUID(reminder_id),
+                request,
+                notification_identity=self.notification_identity,
             )
         except (KeyError, TypeError, ValueError, ValidationError, LookupError) as exc:
             return {"operation": "not_rescheduled", "error": str(exc)}
@@ -584,6 +603,7 @@ class ReminderAgent:
                 uuid.UUID(reminder_id),
                 uuid.UUID(occurrence_id),
                 request,
+                notification_identity=self.notification_identity,
             )
         except (KeyError, TypeError, ValueError, ValidationError, LookupError) as exc:
             return {"operation": "not_snoozed", "error": str(exc)}
@@ -612,6 +632,7 @@ class ReminderAgent:
                 schedule_time=draft.schedule_time,
                 recurrence_frequency=draft.recurrence_frequency if draft.is_recurring else None,
                 recurrence_interval=draft.recurrence_interval,
+                notification_identity=self.notification_identity,
             )
         except ReminderInPastError:
             return {"operation": "not_created", "error": "The reminder time must be strictly in the future."}
@@ -654,6 +675,7 @@ class ReminderAgent:
                     schedule_time=schedule_time,
                     recurrence_frequency=frequency,
                     recurrence_interval=recurrence_interval,
+                    notification_identity=self.notification_identity,
                 )
                 created.append(to_response(reminder, user.timezone).model_dump(mode="json"))
             except (KeyError, TypeError, ValueError, ValidationError) as exc:

@@ -19,6 +19,17 @@ class FakeProvider:
         return self.responses.pop(0)
 
 
+def future_date(days: int = 1) -> str:
+    return (datetime.now(timezone.utc) + timedelta(days=days)).date().isoformat()
+
+
+def future_at(hour: int, days: int = 1) -> str:
+    value = (datetime.now(timezone.utc) + timedelta(days=days)).replace(
+        hour=hour, minute=0, second=0, microsecond=0
+    )
+    return value.isoformat()
+
+
 def test_unrelated_request_is_declined_by_llm(db):
     user = UserService(db).create(UserCreate(name="A", timezone="UTC"))
     provider = FakeProvider(LLMResponse(text="I can only help create or retrieve reminders."))
@@ -39,7 +50,7 @@ def test_agent_executes_create_tool(db):
                     ToolCall(
                         id="call_1",
                         name="create_reminder",
-                        arguments={"title": "Call", "date": "2026-11-15", "time": "09:00:00"},
+                        arguments={"title": "Call", "date": future_date(), "time": "09:00:00"},
                     )
                 ]
             ),
@@ -50,7 +61,7 @@ def test_agent_executes_create_tool(db):
         user.id, "Remind me to call tomorrow"
     )
     assert result.response == 'Absolutely! I\'ll remind you about "Call" tomorrow morning.'
-    tool_result = provider.calls[1][0][-1]
+    tool_result = provider.calls[2][0][-1]
     assert tool_result["role"] == "user"
     assert '"operation": "created"' in tool_result["content"]
 
@@ -69,7 +80,7 @@ def test_agent_discovers_then_reschedules_with_exact_id(db):
             LLMResponse(tool_calls=[ToolCall(name="list_reminders", arguments={"title": "Call Ali", "status": "pending"})]),
             LLMResponse(tool_calls=[ToolCall(name="reschedule_reminder", arguments={
                 "reminder_id": str(reminder.id),
-                "schedule": "2026-11-16T20:00:00+00:00",
+                "schedule": future_at(20),
                 "scope": "series",
             })]),
             LLMResponse(text="Moved your reminder."),
@@ -174,7 +185,7 @@ def test_agent_uses_one_filtered_and_one_broad_discovery_before_rescheduling(db)
                         name="reschedule_reminder",
                         arguments={
                             "reminder_id": str(reminder.id),
-                            "schedule": "2026-11-16T17:00:00+00:00",
+                            "schedule": future_at(17),
                             "scope": "series",
                         },
                     )
@@ -212,7 +223,7 @@ def test_agent_can_follow_list_with_mutation_before_final_response(db):
                         name="reschedule_reminder",
                         arguments={
                             "reminder_id": str(reminder.id),
-                            "schedule": "2026-11-16T09:00:00+00:00",
+                            "schedule": future_at(9),
                             "scope": "series",
                         },
                     )
@@ -254,7 +265,7 @@ def test_reschedule_requires_an_exact_id_and_does_not_search(db):
         user.id,
         {
             "title": "Call Ali",
-            "schedule": "2026-11-16T20:00:00+00:00",
+            "schedule": future_at(20),
             "scope": "series",
         },
     )
@@ -286,7 +297,7 @@ def test_creation_can_collect_details_across_turns(db):
                 tool_calls=[
                     ToolCall(
                         name="update_reminder_draft",
-                        arguments={"title": "Call Ali", "date": "2026-11-15"},
+                        arguments={"title": "Call Ali", "date": future_date()},
                     )
                 ]
             ),
@@ -325,7 +336,7 @@ def test_one_conversation_can_create_multiple_reminders_and_list_them(db):
                 tool_calls=[
                     ToolCall(
                         name="create_reminder",
-                        arguments={"title": "First", "date": "2026-11-15", "time": "09:00"},
+                        arguments={"title": "First", "date": future_date(), "time": "09:00"},
                     )
                 ]
             ),
@@ -334,7 +345,7 @@ def test_one_conversation_can_create_multiple_reminders_and_list_them(db):
                 tool_calls=[
                     ToolCall(
                         name="create_reminder",
-                        arguments={"title": "Second", "date": "2026-11-16", "time": "10:00"},
+                        arguments={"title": "Second", "date": future_date(2), "time": "10:00"},
                     )
                 ]
             ),
@@ -361,11 +372,11 @@ def test_one_message_can_create_multiple_reminders(db):
                 tool_calls=[
                     ToolCall(
                         name="create_reminder",
-                        arguments={"title": "First", "date": "2026-11-15", "time": "09:00"},
+                        arguments={"title": "First", "date": future_date(), "time": "09:00"},
                     ),
                     ToolCall(
                         name="create_reminder",
-                        arguments={"title": "Second", "date": "2026-11-16", "time": "10:00"},
+                        arguments={"title": "Second", "date": future_date(2), "time": "10:00"},
                     ),
                 ]
             ),
@@ -388,8 +399,8 @@ def test_batch_tool_creates_each_reminder_item(db):
                         name="create_reminders",
                         arguments={
                             "reminders": [
-                                {"title": "First", "date": "2026-11-15", "time": "09:00"},
-                                {"title": "Second", "date": "2026-11-16", "time": "10:00"},
+                                {"title": "First", "date": future_date(), "time": "09:00"},
+                                {"title": "Second", "date": future_date(2), "time": "10:00"},
                             ]
                         },
                     )
