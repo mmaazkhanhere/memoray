@@ -12,8 +12,11 @@ from app.users.service import UserService
 
 def test_create_stores_utc_and_pending_occurrence(db):
     user = UserService(db).create(UserCreate(name="A", timezone="Asia/Karachi"))
+    schedule = (datetime.now(ZoneInfo("Asia/Karachi")) + timedelta(days=1)).replace(
+        hour=9, minute=0, second=0, microsecond=0, tzinfo=None
+    )
     reminder = ReminderService(db).create(
-        user.id, ReminderCreate(title="Call", schedule=datetime(2026, 11, 15, 9, 0))
+        user.id, ReminderCreate(title="Call", schedule=schedule)
     )
     assert reminder.schedule.hour == 4
     assert reminder.status == ReminderStatus.active
@@ -23,8 +26,10 @@ def test_create_stores_utc_and_pending_occurrence(db):
 def test_list_filters_by_title_and_status(db):
     user = UserService(db).create(UserCreate(name="A", timezone="UTC"))
     service = ReminderService(db)
-    service.create(user.id, ReminderCreate(title="Pay bill", schedule=datetime(2026, 11, 15, 9, 0)))
-    service.create(user.id, ReminderCreate(title="Call", schedule=datetime(2026, 11, 16, 9, 0)))
+    first = (datetime.now(timezone.utc) + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+    second = (datetime.now(timezone.utc) + timedelta(days=2)).replace(hour=9, minute=0, second=0, microsecond=0)
+    service.create(user.id, ReminderCreate(title="Pay bill", schedule=first))
+    service.create(user.id, ReminderCreate(title="Call", schedule=second))
     results = service.list(user.id, ReminderQuery(title="bill", status=ReminderListStatus.pending))
     assert [item.title for item in results] == ["Pay bill"]
 
@@ -32,7 +37,8 @@ def test_list_filters_by_title_and_status(db):
 def test_user_isolation(db):
     first = UserService(db).create(UserCreate(name="A", timezone="UTC"))
     second = UserService(db).create(UserCreate(name="B", timezone="UTC"))
-    ReminderService(db).create(first.id, ReminderCreate(title="Private", schedule=datetime(2026, 11, 15, 9, 0)))
+    schedule = datetime.now(timezone.utc) + timedelta(days=1)
+    ReminderService(db).create(first.id, ReminderCreate(title="Private", schedule=schedule))
     assert ReminderService(db).list(second.id, ReminderQuery()) == []
 
 
