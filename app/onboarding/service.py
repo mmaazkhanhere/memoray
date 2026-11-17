@@ -17,6 +17,7 @@ from app.models import (
 )
 from app.phones.service import PhoneService
 from app.time_utils import validate_timezone
+from app.mcp.auth.service import McpAuthService, OAuthError
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,12 @@ class OnboardingService:
     def handle_completed(self, account: ChannelAccount, message: IncomingMessage) -> OnboardingResult:
         """Handle phone linking requested after onboarding has already completed."""
         command = (message.text or "").strip().casefold()
+        if command.startswith("/start mcp_"):
+            nonce = (message.text or "").strip().split(None, 1)[1].removeprefix("mcp_").strip()
+            return self._connect_chatgpt(account, nonce)
+        if command.startswith("/connect_chatgpt ") or command.startswith("/connect chatgpt "):
+            nonce = (message.text or "").split(None, 1)[1].strip()
+            return self._connect_chatgpt(account, nonce)
         if command in {"/connect_calendar", "/connect calendar"}:
             return self._calendar_connect(account)
         if message.contact is not None:
@@ -84,17 +91,46 @@ class OnboardingService:
             external_user_id=message.external_user_id,
             external_chat_id=message.external_chat_id,
             onboarding_state=state,
+            pending_mcp_nonce=self._mcp_nonce_from_message(message),
         )
         self.db.add(account)
         self.db.flush()
         return account
 
     def _start(self, account: ChannelAccount, message: IncomingMessage) -> OnboardingResult:
+        command = (message.text or "").strip()
+        if command.casefold().startswith("/start mcp_"):
+            nonce = command.split(None, 1)[1].removeprefix("mcp_").strip()
+            if account.onboarding_state == ChannelAccountState.completed:
+                return self._connect_chatgpt(account, nonce)
+            account.pending_mcp_nonce = nonce
+            self.db.flush()
         if account.onboarding_state == ChannelAccountState.completed:
             return OnboardingResult(
                 account, [self._reply(account, "Welcome back! How can I help?")], True
             )
         return OnboardingResult(account, [self._prompt(account)], True)
+
+    def _connect_chatgpt(self, account: ChannelAccount, nonce: str) -> OnboardingResult:
+        try:
+            McpAuthService(self.db).approve_nonce(nonce, account.user.id)
+            self.db.flush()
+        except OAuthError as exc:
+            return OnboardingResult(
+                account,
+                [self._reply(account, f"I couldn't connect ChatGPT: {exc.description}")],
+                True,
+            )
+        return OnboardingResult(
+            account,
+            [
+                self._reply(
+                    account,
+                    "ChatGPT is now connected to this Memoray account. You can close Telegram and continue there.",
+                )
+            ],
+            True,
+        )
 
     def _name(self, account: ChannelAccount, message: IncomingMessage) -> OnboardingResult:
         name = (message.text or "").strip()
@@ -130,19 +166,12 @@ class OnboardingService:
         account.user.timezone = timezone_name
         account.user.status = UserStatus.active
         account.onboarding_state = ChannelAccountState.needs_phone_decision
+        link_reply = self._approve_pending_mcp_link(account)
         self.db.flush()
-        return OnboardingResult(
-            account,
-            [
-                self._reply(
-                    account,
-                    "Would you like to link your phone for live calls? "
-                    "Share your contact or tap Skip for now.",
-                    request_phone=True,
-                )
-            ],
-            True,
-        )
+        replies = [self._reply(account, "Would you like to link your phone for live calls? Share your contact or tap Skip for now.", request_phone=True)]
+        if link_reply:
+            replies.append(link_reply)
+        return OnboardingResult(account, replies, True)
 
     def _phone_decision(
         self, account: ChannelAccount, message: IncomingMessage
@@ -166,6 +195,7 @@ class OnboardingService:
 
         if (message.text or "").strip().casefold() in {"skip", "skip for now", "no", "not now"}:
             account.onboarding_state = ChannelAccountState.completed
+            self._approve_pending_mcp_link(account)
             self.db.flush()
             return OnboardingResult(
                 account,
@@ -180,6 +210,7 @@ class OnboardingService:
             )
         if (message.text or "").strip().casefold() in {"/cancel", "cancel"}:
             account.onboarding_state = ChannelAccountState.completed
+            self._approve_pending_mcp_link(account)
             self.db.flush()
             return OnboardingResult(
                 account,
@@ -250,6 +281,7 @@ class OnboardingService:
                 True,
             )
         account.onboarding_state = ChannelAccountState.completed
+        self._approve_pending_mcp_link(account)
         self.db.flush()
         return OnboardingResult(
             account,
@@ -262,6 +294,24 @@ class OnboardingService:
             ],
             True,
         )
+
+    @staticmethod
+    def _mcp_nonce_from_message(message: IncomingMessage) -> str | None:
+        command = (message.text or "").strip()
+        if command.casefold().startswith("/start mcp_"):
+            return command.split(None, 1)[1].removeprefix("mcp_").strip() or None
+        return None
+
+    def _approve_pending_mcp_link(self, account: ChannelAccount) -> None:
+        nonce = account.pending_mcp_nonce
+        if not nonce:
+            return
+        account.pending_mcp_nonce = None
+        try:
+            McpAuthService(self.db).approve_nonce(nonce, account.user.id)
+        except OAuthError:
+            # The browser will display the authorization failure; onboarding must remain usable.
+            return
 
     def _calendar_connect(self, account: ChannelAccount) -> OnboardingResult:
         service = self.calendar_service
