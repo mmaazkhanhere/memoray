@@ -32,8 +32,28 @@ class ReminderService:
         self.users = UserService(db)
         self.destinations = DestinationService(db)
 
-    def create(self, user_id: uuid.UUID, data: ReminderCreate) -> Reminder:
+    def create(
+        self,
+        user_id: uuid.UUID,
+        data: ReminderCreate,
+        *,
+        notification_identity: ChannelIdentity | None = None,
+    ) -> Reminder:
+        return self._create(user_id, data, notification_identity=notification_identity)
+
+    def _create(
+        self,
+        user_id: uuid.UUID,
+        data: ReminderCreate,
+        *,
+        notification_identity: ChannelIdentity | None = None,
+    ) -> Reminder:
         user = self.users.get(user_id)
+        if notification_identity is not None and (
+            notification_identity.user_id != user_id
+            or notification_identity.status != ChannelIdentityStatus.linked
+        ):
+            raise ValueError("notification identity is not linked to this user")
         if data.is_recurring and data.recurrence_frequency is None:
             raise ValueError("recurrence frequency is required for recurring reminders")
         if data.recurrence_interval < 1:
@@ -86,8 +106,8 @@ class ReminderService:
         try:
             self.db.flush()
             occurrence = reminder.occurrences[0]
-            identity = None
-            if data.destination_id is None:
+            identity = notification_identity
+            if identity is None and data.destination_id is None:
                 identity = self.db.scalar(
                     select(ChannelIdentity)
                     .where(
@@ -126,6 +146,7 @@ class ReminderService:
         schedule_time: time,
         recurrence_frequency: RecurrenceFrequency | None,
         recurrence_interval: int = 1,
+        notification_identity: ChannelIdentity | None = None,
     ) -> Reminder:
         user = self.users.get(user_id)
         local_schedule = datetime.combine(
@@ -135,7 +156,7 @@ class ReminderService:
             local_now = datetime.now(ZoneInfo(user.timezone))
             while local_schedule <= local_now:
                 local_schedule = next_occurrence(local_schedule, recurrence_frequency, recurrence_interval)
-        return self.create(
+        return self._create(
             user_id,
             ReminderCreate(
                 title=title,
@@ -144,6 +165,7 @@ class ReminderService:
                 recurrence_frequency=recurrence_frequency,
                 recurrence_interval=recurrence_interval,
             ),
+            notification_identity=notification_identity,
         )
 
     def complete_occurrence(

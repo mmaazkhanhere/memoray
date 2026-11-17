@@ -22,6 +22,8 @@ class ReminderSnoozer:
         reminder_id: uuid.UUID,
         occurrence_id: uuid.UUID,
         request: SnoozeRequest,
+        *,
+        notification_identity: ChannelIdentity | None = None,
     ) -> Reminder:
         self.users.get(user_id)
         reminder = self.db.scalar(
@@ -40,15 +42,21 @@ class ReminderSnoozer:
             raise OccurrenceNotNotifiedError("only notified occurrences can be snoozed")
         occurrence.next_due_at = datetime.now(timezone.utc) + timedelta(seconds=request.duration_seconds)
         occurrence.status = OccurrenceStatus.pending
-        identity = self.db.scalar(
-            select(ChannelIdentity)
-            .where(
-                ChannelIdentity.user_id == user_id,
-                ChannelIdentity.status == ChannelIdentityStatus.linked,
-                ChannelIdentity.is_default.is_(True),
+        identity = notification_identity
+        if identity is None:
+            identity = self.db.scalar(
+                select(ChannelIdentity)
+                .where(
+                    ChannelIdentity.user_id == user_id,
+                    ChannelIdentity.status == ChannelIdentityStatus.linked,
+                    ChannelIdentity.is_default.is_(True),
+                )
+                .order_by(ChannelIdentity.created_at.asc())
             )
-            .order_by(ChannelIdentity.created_at.asc())
-        )
+        if identity is not None and (
+            identity.user_id != user_id or identity.status != ChannelIdentityStatus.linked
+        ):
+            raise ValueError("notification identity is not linked")
         NotificationService(self.db).replace_pending(
             reminder,
             occurrence,

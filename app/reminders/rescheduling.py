@@ -37,6 +37,8 @@ class ReminderRescheduler:
         user_id: uuid.UUID,
         reminder_id: uuid.UUID,
         request: ReminderRescheduleRequest,
+        *,
+        notification_identity: ChannelIdentity | None = None,
     ) -> Reminder:
         user = self.users.get(user_id)
         schedule = to_utc(request.schedule, user.timezone)
@@ -105,8 +107,12 @@ class ReminderRescheduler:
             reminder.series_anchor_schedule = schedule
 
         reminder.destination_id = destination.id
-        identity = None
-        if request.destination_id is None:
+        identity = notification_identity
+        if identity is not None and (
+            identity.user_id != user_id or identity.status != ChannelIdentityStatus.linked
+        ):
+            raise InvalidDestinationError("notification identity is not linked")
+        if identity is None and request.destination_id is None:
             identity = self.db.scalar(
                 select(ChannelIdentity)
                 .where(
