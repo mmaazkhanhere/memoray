@@ -73,6 +73,91 @@ def test_onboarding_rejects_invalid_timezone_and_can_skip_phone(db):
     assert db.query(User).one().timezone == "Asia/Karachi"
 
 
+def test_skipped_phone_can_be_linked_later_with_command_and_contact(db):
+    service = channel_service(db)
+    service.process(incoming(1, text="/start", display_name="Ada"))
+    service.process(incoming(2, text="UTC"))
+    service.process(incoming(3, text="Skip for now"))
+
+    prompt = service.process(incoming(4, text="/link phone"))
+    assert "share your telegram contact" in prompt[-1].content.lower()
+    assert prompt[-1].request_phone is True
+    assert db.query(PhoneLink).count() == 0
+
+    linked = service.process(
+        incoming(5, contact=IncomingContact("+1 (415) 555-0123", "10"))
+    )
+    assert "phone is linked" in linked[-1].content.lower()
+    assert db.query(PhoneLink).one().e164_number == "+14155550123"
+    assert db.query(ChannelAccount).one().onboarding_state == ChannelAccountState.completed
+
+
+def test_skipped_phone_can_be_linked_later_by_sharing_contact_directly(db):
+    service = channel_service(db)
+    service.process(incoming(1, text="/start", display_name="Ada"))
+    service.process(incoming(2, text="UTC"))
+    service.process(incoming(3, text="skip"))
+
+    linked = service.process(
+        incoming(4, contact=IncomingContact("+1 (415) 555-0123", "10"))
+    )
+    assert "phone is linked" in linked[-1].content.lower()
+    assert db.query(PhoneLink).one().e164_number == "+14155550123"
+
+
+def test_later_phone_link_prompt_can_be_canceled(db):
+    service = channel_service(db)
+    service.process(incoming(1, text="/start", display_name="Ada"))
+    service.process(incoming(2, text="UTC"))
+    service.process(incoming(3, text="skip"))
+    service.process(incoming(4, text="/link phone"))
+
+    canceled = service.process(incoming(5, text="/cancel"))
+    assert "remains optional" in canceled[-1].content.lower()
+    assert db.query(PhoneLink).count() == 0
+    assert db.query(ChannelAccount).one().onboarding_state == ChannelAccountState.completed
+
+
+def test_phone_link_accepts_typed_international_number_after_prompt(db):
+    service = channel_service(db)
+    service.process(incoming(1, text="/start", display_name="Ada"))
+    service.process(incoming(2, text="UTC"))
+    service.process(incoming(3, text="skip"))
+    service.process(incoming(4, text="/link phone"))
+
+    linked = service.process(incoming(5, text="+14155550123"))
+    assert "phone is linked" in linked[-1].content.lower()
+    assert db.query(PhoneLink).one().e164_number == "+14155550123"
+
+
+def test_invalid_contact_keeps_contact_keyboard_and_explains_format(db):
+    service = channel_service(db)
+    service.process(incoming(1, text="/start", display_name="Ada"))
+    service.process(incoming(2, text="UTC"))
+    service.process(incoming(3, text="skip"))
+    service.process(incoming(4, text="/link phone"))
+
+    rejected = service.process(
+        incoming(5, contact=IncomingContact("03001234567", "10"))
+    )
+    assert "international" in rejected[-1].content.lower()
+    assert rejected[-1].request_phone is True
+    assert db.query(PhoneLink).count() == 0
+
+
+def test_telegram_contact_without_plus_can_be_normalized_as_international(db):
+    service = channel_service(db)
+    service.process(incoming(1, text="/start", display_name="Ada"))
+    service.process(incoming(2, text="UTC"))
+    service.process(incoming(3, text="skip"))
+
+    linked = service.process(
+        incoming(4, contact=IncomingContact("923001234567", "10"))
+    )
+    assert "phone is linked" in linked[-1].content.lower()
+    assert db.query(PhoneLink).one().e164_number == "+923001234567"
+
+
 def test_contact_must_belong_to_sender_and_valid_contact_is_normalized(db):
     service = channel_service(db)
     service.process(incoming(1, text="/start", display_name="Ada"))

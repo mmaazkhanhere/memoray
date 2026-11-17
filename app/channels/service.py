@@ -59,44 +59,48 @@ class ChannelMessageService:
             if account.onboarding_state != ChannelAccountState.completed:
                 result = onboarding.handle(account, message)
                 replies = result.replies if result.handled else []
-            elif message.completion_occurrence_id is not None:
-                completion = CompletionService(self.db).complete_by_id(
-                    account.user_id,
-                    message.completion_occurrence_id,
-                )
-                replies = [
-                    OutgoingMessage(
-                        message.channel,
-                        message.external_chat_id,
-                        self._completion_reply(completion),
-                    )
-                ]
-            elif message.text and message.text.strip().casefold() == "/start":
-                replies = [
-                    OutgoingMessage(
-                        message.channel, message.external_chat_id, "Welcome back! How can I help?"
-                    )
-                ]
             else:
-                agent = self.agent_factory(self.db)
-                handle = agent.handle
-                if "commit" in inspect.signature(handle).parameters:
-                    result = handle(
+                phone_result = onboarding.handle_completed(account, message)
+                if phone_result.handled:
+                    replies = phone_result.replies
+                elif message.completion_occurrence_id is not None:
+                    completion = CompletionService(self.db).complete_by_id(
                         account.user_id,
-                        message.text or "",
-                        account.conversation_id,
-                        commit=False,
+                        message.completion_occurrence_id,
                     )
+                    replies = [
+                        OutgoingMessage(
+                            message.channel,
+                            message.external_chat_id,
+                            self._completion_reply(completion),
+                        )
+                    ]
+                elif message.text and message.text.strip().casefold() == "/start":
+                    replies = [
+                        OutgoingMessage(
+                            message.channel, message.external_chat_id, "Welcome back! How can I help?"
+                        )
+                    ]
                 else:
-                    result = handle(
-                        account.user_id,
-                        message.text or "",
-                        account.conversation_id,
-                    )
-                account.conversation_id = result.conversation_id
-                replies = [
-                    OutgoingMessage(message.channel, message.external_chat_id, result.response)
-                ]
+                    agent = self.agent_factory(self.db)
+                    handle = agent.handle
+                    if "commit" in inspect.signature(handle).parameters:
+                        result = handle(
+                            account.user_id,
+                            message.text or "",
+                            account.conversation_id,
+                            commit=False,
+                        )
+                    else:
+                        result = handle(
+                            account.user_id,
+                            message.text or "",
+                            account.conversation_id,
+                        )
+                    account.conversation_id = result.conversation_id
+                    replies = [
+                        OutgoingMessage(message.channel, message.external_chat_id, result.response)
+                    ]
 
             records = [
                 OutboundMessage(

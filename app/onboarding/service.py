@@ -42,6 +42,27 @@ class OnboardingService:
             return self._phone_decision(account, message)
         return OnboardingResult(account, [], False)
 
+    def handle_completed(self, account: ChannelAccount, message: IncomingMessage) -> OnboardingResult:
+        """Handle phone linking requested after onboarding has already completed."""
+        if message.contact is not None:
+            return self._phone_decision(account, message)
+        command = (message.text or "").strip().casefold()
+        if command not in {"/link phone", "/link_phone", "/add phone", "/phone"}:
+            return OnboardingResult(account, [], False)
+        account.onboarding_state = ChannelAccountState.needs_phone_decision
+        self.db.flush()
+        return OnboardingResult(
+            account,
+            [
+                self._reply(
+                    account,
+                    "Share your Telegram contact to link your phone for live calls, or send /cancel.",
+                    request_phone=True,
+                )
+            ],
+            True,
+        )
+
     def create_account(self, message: IncomingMessage) -> ChannelAccount:
         display_name = (message.display_name or "").strip()
         user = User(
@@ -130,40 +151,13 @@ class OnboardingService:
                     owner_external_id=message.contact.owner_external_id,
                     raw_number=message.contact.phone_number,
                 )
-                self.phones.link(account.user.id, number)
-                has_default_phone = self.db.scalar(
-                    select(ChannelIdentity.id).where(
-                        ChannelIdentity.user_id == account.user.id,
-                        ChannelIdentity.channel == ChannelKind.phone,
-                        ChannelIdentity.status == ChannelIdentityStatus.linked,
-                        ChannelIdentity.is_default.is_(True),
-                    )
-                )
-                self.db.add(
-                    ChannelIdentity(
-                        user_id=account.user.id,
-                        channel=ChannelKind.phone,
-                        external_principal_id=number,
-                        external_destination_id=number,
-                        status=ChannelIdentityStatus.linked,
-                        is_default=has_default_phone is None,
-                        verified_at=datetime.now(timezone.utc),
-                    )
-                )
             except ValueError as exc:
-                return OnboardingResult(account, [self._reply(account, str(exc))], True)
-            account.onboarding_state = ChannelAccountState.completed
-            self.db.flush()
-            return OnboardingResult(
-                account,
-                [
-                    self._reply(
-                        account,
-                        "Your phone is linked. You can now use the agent here and on live calls.",
-                    )
-                ],
-                True,
-            )
+                return OnboardingResult(
+                    account,
+                    [self._reply(account, str(exc), request_phone=True)],
+                    True,
+                )
+            return self._link_phone_number(account, number)
 
         if (message.text or "").strip().casefold() in {"skip", "skip for now", "no", "not now"}:
             account.onboarding_state = ChannelAccountState.completed
@@ -178,6 +172,31 @@ class OnboardingService:
                 ],
                 True,
             )
+        if (message.text or "").strip().casefold() in {"/cancel", "cancel"}:
+            account.onboarding_state = ChannelAccountState.completed
+            self.db.flush()
+            return OnboardingResult(
+                account,
+                [self._reply(account, "No problem. Phone linking remains optional.")],
+                True,
+            )
+        candidate = (message.text or "").strip()
+        if candidate.startswith("+") or candidate.startswith("00"):
+            try:
+                number = self.phones.normalize_e164(candidate)
+            except ValueError:
+                return OnboardingResult(
+                    account,
+                    [
+                        self._reply(
+                            account,
+                            "That phone number is invalid. Use an international number such as +14155550123.",
+                            request_phone=True,
+                        )
+                    ],
+                    True,
+                )
+            return self._link_phone_number(account, number)
         return OnboardingResult(
             account,
             [
@@ -185,6 +204,47 @@ class OnboardingService:
                     account,
                     "Please share your Telegram contact or tap Skip for now.",
                     request_phone=True,
+                )
+            ],
+            True,
+        )
+
+    def _link_phone_number(self, account: ChannelAccount, number: str) -> OnboardingResult:
+        try:
+            self.phones.link(account.user.id, number)
+            has_default_phone = self.db.scalar(
+                select(ChannelIdentity.id).where(
+                    ChannelIdentity.user_id == account.user.id,
+                    ChannelIdentity.channel == ChannelKind.phone,
+                    ChannelIdentity.status == ChannelIdentityStatus.linked,
+                    ChannelIdentity.is_default.is_(True),
+                )
+            )
+            self.db.add(
+                ChannelIdentity(
+                    user_id=account.user.id,
+                    channel=ChannelKind.phone,
+                    external_principal_id=number,
+                    external_destination_id=number,
+                    status=ChannelIdentityStatus.linked,
+                    is_default=has_default_phone is None,
+                    verified_at=datetime.now(timezone.utc),
+                )
+            )
+        except ValueError as exc:
+            return OnboardingResult(
+                account,
+                [self._reply(account, str(exc), request_phone=True)],
+                True,
+            )
+        account.onboarding_state = ChannelAccountState.completed
+        self.db.flush()
+        return OnboardingResult(
+            account,
+            [
+                self._reply(
+                    account,
+                    "Your phone is linked. You can now use the agent here and on live calls.",
                 )
             ],
             True,

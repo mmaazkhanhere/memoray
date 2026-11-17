@@ -16,6 +16,18 @@ class PhoneService:
         self.db = db
 
     @staticmethod
+    def normalize_e164(raw_number: str | None) -> str:
+        """Normalize a provider caller number without accepting local numbers."""
+        if not raw_number:
+            raise ValueError("phone number is required")
+        value = re.sub(r"[\s().-]", "", str(raw_number))
+        if value.startswith("00"):
+            value = "+" + value[2:]
+        if not re.fullmatch(r"\+[1-9]\d{7,14}", value):
+            raise ValueError("phone number is invalid")
+        return value
+
+    @staticmethod
     def normalize_contact(*, sender_id: str, owner_external_id: str | None, raw_number: str | None) -> str:
         if not owner_external_id:
             raise ValueError("contact owner is required")
@@ -23,12 +35,17 @@ class PhoneService:
             raise ValueError("contact belongs to another sender")
         if not raw_number:
             raise ValueError("contact phone number is required")
-        value = re.sub(r"[\s().-]", "", raw_number)
-        if value.startswith("00"):
-            value = "+" + value[2:]
-        if not re.fullmatch(r"\+[1-9]\d{7,14}", value):
-            raise ValueError("phone number is invalid; use an international number such as +14155550123")
-        return value
+        try:
+            candidate = str(raw_number).strip()
+            # Telegram contact payloads may omit the leading plus while still
+            # carrying a full international number (for example, 923001234567).
+            if candidate and not candidate.startswith(("+", "00")):
+                candidate = "+" + candidate
+            return PhoneService.normalize_e164(candidate)
+        except ValueError as exc:
+            raise ValueError(
+                "phone number is invalid; use an international number such as +14155550123"
+            ) from exc
 
     def link(self, user_id: uuid.UUID, e164_number: str) -> PhoneLink:
         link = PhoneLink(user_id=user_id, e164_number=e164_number, is_active=True)
