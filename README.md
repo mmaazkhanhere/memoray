@@ -162,6 +162,22 @@ is not required: reminder changes remain durable in Memoray and are projected on
 `VAPI_VOICE_PROVIDER` and `VAPI_VOICE_ID` are used when synchronizing Riley from the repository. The request deadline
 defaults to six seconds.
 
+### Urgent reminders
+
+Set `is_urgent` when creating a reminder (the conversational agent accepts the explicit word “urgent”). Urgent
+reminders require both a linked phone number and Telegram account. With `URGENT_REMINDERS_ENABLED=true`, the
+notification worker starts a call through `VAPI_OUTBOUND_ASSISTANT_ID` and `VAPI_PHONE_NUMBER_ID`; the dedicated
+outbound assistant announces the reminder and ends the call. A human answer marks the occurrence delivered. A
+no-answer, busy, or voicemail outcome gets one retry. After two unanswered calls, the normal Telegram outbox sends a
+message saying that Memoray called twice and the task still needs to be completed.
+
+The inbound assistant remains `VAPI_ASSISTANT_ID`; both assistants can use the same Vapi/Twilio phone number and
+webhook. Synchronize the dedicated assistant explicitly with:
+
+```powershell
+uv run sync-vapi-outbound-assistant
+```
+
 ### Sync Riley from the repository
 
 Use the explicit sync command after changing the shared agent tools or prompt. It updates Riley through Vapi's
