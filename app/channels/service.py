@@ -32,11 +32,13 @@ class ChannelMessageService:
         self.db = db
         self.agent_factory = agent_factory
 
-    def process(self, message: IncomingMessage) -> list[OutboundMessage]:
+    def process(
+        self, message: IncomingMessage, *, create_account: bool = True
+    ) -> list[OutboundMessage]:
         event = self.claim(message)
         if event is None:
             return self.pending_for(message.channel, message.external_chat_id)
-        return self.process_claimed(message, event)
+        return self.process_claimed(message, event, create_account=create_account)
 
     def claim(self, message: IncomingMessage) -> InboundEvent | None:
         """Durably claim an update before any external work is performed."""
@@ -51,56 +53,77 @@ class ChannelMessageService:
             raise
 
     def process_claimed(
-        self, message: IncomingMessage, event: InboundEvent
+        self,
+        message: IncomingMessage,
+        event: InboundEvent,
+        *,
+        create_account: bool = True,
     ) -> list[OutboundMessage]:
         try:
-            account = self._account_for(message)
-            onboarding = OnboardingService(self.db)
-            if account.onboarding_state != ChannelAccountState.completed:
-                result = onboarding.handle(account, message)
-                replies = result.replies if result.handled else []
-            else:
-                phone_result = onboarding.handle_completed(account, message)
-                if phone_result.handled:
-                    replies = phone_result.replies
-                elif message.completion_occurrence_id is not None:
-                    completion = CompletionService(self.db).complete_by_id(
-                        account.user_id,
-                        message.completion_occurrence_id,
+            account = self._account_for(message, create_account=create_account)
+            if account is None:
+                replies = [
+                    OutgoingMessage(
+                        message.channel,
+                        message.external_chat_id,
+                        "This Discord account is not linked yet. In Telegram, send /connect_discord and then authorize Discord.",
                     )
-                    replies = [
-                        OutgoingMessage(
-                            message.channel,
-                            message.external_chat_id,
-                            self._completion_reply(completion),
-                        )
-                    ]
-                elif message.text and message.text.strip().casefold() == "/start":
-                    replies = [
-                        OutgoingMessage(
-                            message.channel, message.external_chat_id, "Welcome back! How can I help?"
-                        )
-                    ]
+                ]
+            else:
+                onboarding = OnboardingService(self.db)
+                if account.onboarding_state != ChannelAccountState.completed:
+                    result = onboarding.handle(account, message)
+                    replies = result.replies if result.handled else []
                 else:
-                    agent = self.agent_factory(self.db)
-                    handle = agent.handle
-                    if "commit" in inspect.signature(handle).parameters:
-                        result = handle(
+                    phone_result = onboarding.handle_completed(account, message)
+                    if phone_result.handled:
+                        replies = phone_result.replies
+                    elif message.completion_occurrence_id is not None:
+                        completion = CompletionService(self.db).complete_by_id(
                             account.user_id,
-                            message.text or "",
-                            account.conversation_id,
-                            commit=False,
+                            message.completion_occurrence_id,
                         )
+                        replies = [
+                            OutgoingMessage(
+                                message.channel,
+                                message.external_chat_id,
+                                self._completion_reply(completion),
+                            )
+                        ]
+                    elif message.text and message.text.strip().casefold() == "/start":
+                        replies = [
+                            OutgoingMessage(
+                                message.channel, message.external_chat_id, "Welcome back! How can I help?"
+                            )
+                        ]
                     else:
-                        result = handle(
-                            account.user_id,
-                            message.text or "",
-                            account.conversation_id,
+                        identity = self.db.scalar(
+                            select(ChannelIdentity).where(
+                                ChannelIdentity.user_id == account.user_id,
+                                ChannelIdentity.channel == account.channel,
+                                ChannelIdentity.external_principal_id == account.external_user_id,
+                                ChannelIdentity.status == ChannelIdentityStatus.linked,
+                            )
                         )
-                    account.conversation_id = result.conversation_id
-                    replies = [
-                        OutgoingMessage(message.channel, message.external_chat_id, result.response)
-                    ]
+                        agent = self._agent_for(identity)
+                        handle = agent.handle
+                        if "commit" in inspect.signature(handle).parameters:
+                            result = handle(
+                                account.user_id,
+                                message.text or "",
+                                account.conversation_id,
+                                commit=False,
+                            )
+                        else:
+                            result = handle(
+                                account.user_id,
+                                message.text or "",
+                                account.conversation_id,
+                            )
+                        account.conversation_id = result.conversation_id
+                        replies = [
+                            OutgoingMessage(message.channel, message.external_chat_id, result.response)
+                        ]
 
             records = [
                 OutboundMessage(
@@ -122,6 +145,15 @@ class ChannelMessageService:
         except Exception:
             self.db.rollback()
             raise
+
+    def _agent_for(self, identity: ChannelIdentity | None) -> ReminderAgent:
+        """Preserve compatibility with small test/demonstration factories."""
+        try:
+            return self.agent_factory(self.db, notification_identity=identity)
+        except TypeError as exc:
+            if "notification_identity" not in str(exc):
+                raise
+            return self.agent_factory(self.db)
 
     @staticmethod
     def _completion_reply(result) -> str:
@@ -216,7 +248,9 @@ class ChannelMessageService:
             return None
         return event
 
-    def _account_for(self, message: IncomingMessage) -> ChannelAccount:
+    def _account_for(
+        self, message: IncomingMessage, *, create_account: bool = True
+    ) -> ChannelAccount | None:
         account = self.db.scalar(
             select(ChannelAccount).where(
                 ChannelAccount.channel == ChannelKind(message.channel),
@@ -227,6 +261,8 @@ class ChannelMessageService:
             account.external_chat_id = message.external_chat_id
             self._sync_identity(account)
             return account
+        if not create_account:
+            return None
         onboarding = OnboardingService(self.db)
         try:
             with self.db.begin_nested():

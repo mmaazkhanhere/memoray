@@ -13,6 +13,8 @@ from app.integrations.telegram.adapter import (
     TelegramBotClient,
     TelegramDeliveryError,
 )
+from app.integrations.discord.client import DiscordClient
+from app.integrations.discord.errors import DiscordDeliveryError
 from app.integrations.google_calendar.worker import GoogleCalendarWorker
 
 logger = logging.getLogger(__name__)
@@ -46,6 +48,14 @@ class TelegramDeliveryAdapter:
             # reloaded enum value (some DB drivers return its string value).
             done_occurrence_id=notification.occurrence_id,
         )
+
+
+class DiscordDeliveryAdapter:
+    def __init__(self, token: str):
+        self.client = DiscordClient(bot_token=token)
+
+    def send(self, notification: NotificationDelivery) -> None:
+        self.client.send_message(notification.destination_snapshot, notification.content)
 
 
 class NotificationWorker:
@@ -111,6 +121,8 @@ class NotificationWorker:
                 adapter.send(row)
             except TelegramDeliveryError as exc:
                 self._finalize(send_db, notification_id, exc)
+            except DiscordDeliveryError as exc:
+                self._finalize(send_db, notification_id, exc)
             except (TimeoutError, ConnectionError, OSError) as exc:
                 self._finalize(send_db, notification_id, exc, classification="unknown")
             except Exception as exc:  # provider adapters must not kill the worker loop
@@ -163,4 +175,6 @@ def main() -> None:
     adapters: dict[DeliveryChannel, DeliveryAdapter] = {}
     if settings.telegram_bot_token:
         adapters[DeliveryChannel.telegram] = TelegramDeliveryAdapter(settings.telegram_bot_token)
+    if settings.discord_bot_token:
+        adapters[DeliveryChannel.discord] = DiscordDeliveryAdapter(settings.discord_bot_token)
     NotificationWorker(adapters=adapters).run_forever()

@@ -29,7 +29,7 @@ def _memory_service(db: Session, settings):
     )
 
 
-def create_agent(db: Session) -> ReminderAgent:
+def create_agent(db: Session, *, notification_identity=None) -> ReminderAgent:
     settings = get_settings()
     return ReminderAgent(
         GroqProvider(settings),
@@ -37,6 +37,7 @@ def create_agent(db: Session) -> ReminderAgent:
         UserService(db),
         ConversationService(db),
         _memory_service(db, settings),
+        notification_identity=notification_identity,
     )
 
 

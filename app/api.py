@@ -1,5 +1,7 @@
 import uuid
 import hmac
+import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime
 
@@ -19,6 +21,8 @@ from app.integrations.telegram.voice import (
     VoiceLimits,
     VoiceProcessingError,
 )
+from app.integrations.discord.router import router as discord_router
+from app.integrations.discord.gateway import DiscordGateway, DiscordGatewayRunner
 from app.stt.factory import create_speech_to_text
 from app.reminders.serialization import to_response
 from app.reminders.errors import DuplicateReminderError, ReminderInPastError
@@ -48,12 +52,29 @@ from app.integrations.google_calendar.router import router as google_calendar_ro
 from app.mcp.auth.routes import router as mcp_auth_router
 from app.mcp.transport import router as mcp_router
 
-app = FastAPI(title="Memoray Reminder and Memory Agent", version="0.1.0")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    settings = get_settings()
+    gateway_task = None
+    if settings.discord_bot_token:
+        gateway_task = asyncio.create_task(
+            DiscordGatewayRunner(DiscordGateway(token=settings.discord_bot_token)).run()
+        )
+    try:
+        yield
+    finally:
+        if gateway_task is not None:
+            gateway_task.cancel()
+            await asyncio.gather(gateway_task, return_exceptions=True)
+
+
+app = FastAPI(title="Memoray Reminder and Memory Agent", version="0.1.0", lifespan=lifespan)
 configure_logging()
 app.include_router(vapi_router)
 app.include_router(google_calendar_router)
 app.include_router(mcp_auth_router)
 app.include_router(mcp_router)
+app.include_router(discord_router)
 
 
 @app.get("/health")
