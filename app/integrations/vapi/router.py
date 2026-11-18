@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.db import get_db
 from app.integrations.vapi.service import VapiAuthenticationError, VapiCallService
+from app.urgent_reminders.service import UrgentReminderService
 from app.time_utils import to_user_timezone
 
 logger = logging.getLogger(__name__)
@@ -158,6 +159,61 @@ def _parse_arguments(value: Any) -> dict[str, Any]:
     raise ValueError("Vapi tool arguments are invalid")
 
 
+def _urgent_correlation_key(message: dict[str, Any], call: dict[str, Any]) -> str | None:
+    for source in (call.get("metadata"), message.get("metadata")):
+        if isinstance(source, dict):
+            value = source.get("urgent_attempt_key") or source.get("urgentAttemptKey")
+            if value:
+                return str(value)
+    return None
+
+
+def _urgent_outcome(message: dict[str, Any], call: dict[str, Any]) -> tuple[str, str | None] | None:
+    values = [
+        call.get("answeredBy"),
+        call.get("answered_by"),
+        message.get("answeredBy"),
+        message.get("answered_by"),
+    ]
+    answered_by = next((str(value).casefold() for value in values if value), "")
+    if answered_by:
+        if any(term in answered_by for term in ("human", "person")):
+            return "answered", answered_by
+        if any(term in answered_by for term in ("machine", "voicemail", "fax", "unknown")):
+            return "not_picked", answered_by
+
+    reason = str(message.get("endedReason") or call.get("endedReason") or "").casefold()
+    status = str(message.get("status") or call.get("status") or "").casefold()
+    if not reason and status not in {"ended", "completed"}:
+        return None
+    if any(term in reason for term in ("did-not-answer", "no-answer", "busy", "voicemail", "machine")):
+        return "not_picked", reason or "not_picked"
+    if reason in {
+        "assistant-ended-call", "assistant-said-end-call", "customer-ended-call",
+    } or reason.startswith("assistant"):
+        return "answered", reason or "completed"
+    if not reason and status in {"ended", "completed"}:
+        return "failed", "missing_ended_reason"
+    return "failed", reason
+
+
+def _outbound_assistant_response(attempt, settings) -> dict[str, Any]:
+    assistant_id = settings.vapi_outbound_assistant_id
+    if not assistant_id:
+        raise ValueError("VAPI_OUTBOUND_ASSISTANT_ID is not configured")
+    reminder = attempt.delivery.reminder
+    user = reminder.user
+    return {
+        "assistantId": assistant_id,
+        "assistantOverrides": {
+            "variableValues": {
+                "user_name": user.name or "there",
+                "reminder_text": f"Urgent reminder: {reminder.title}. Please complete this task.",
+            }
+        },
+    }
+
+
 @router.post("/webhooks/vapi")
 async def vapi_webhook(
     request: Request,
@@ -194,6 +250,26 @@ async def vapi_webhook(
         call_id = str(call_data.get("id") or "")
         log_call_id = _call_id(call_data)
         _log_event(logging.INFO, "received", type=message_type, call_id=log_call_id)
+        urgent_service = UrgentReminderService(
+            db, retry_delay_seconds=settings.urgent_call_retry_delay_seconds
+        )
+        urgent_attempt = urgent_service.find_attempt(
+            external_call_id=call_id or None,
+            correlation_key=_urgent_correlation_key(message, call_data),
+        )
+        if urgent_attempt is not None:
+            if message_type == "assistant-request":
+                return _outbound_assistant_response(urgent_attempt, settings)
+            if message_type in {"status-update", "end-of-call-report"}:
+                outcome = _urgent_outcome(message, call_data)
+                if outcome is not None:
+                    urgent_service.handle_provider_outcome(
+                        external_call_id=call_id or None,
+                        correlation_key=urgent_attempt.correlation_key,
+                        outcome=outcome[0],
+                        detail=outcome[1],
+                    )
+            return {}
         service = VapiCallService(db)
         if message_type == "assistant-request":
             number = _caller_number(call_data)

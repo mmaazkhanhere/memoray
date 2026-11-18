@@ -198,10 +198,17 @@ class VapiCallService:
     @staticmethod
     def _add_spoken_confirmation(result: dict[str, Any]) -> None:
         if result.get("operation") == "created_batch" and result.get("created_count"):
-            result["speak"] = (
-                f"I created {result['created_count']} reminders. "
-                "I will notify you on Telegram for each one."
+            created = result.get("created") or []
+            urgent_count = sum(
+                1 for item in created if isinstance(item, dict) and item.get("is_urgent")
             )
+            if urgent_count == len(created):
+                delivery_text = "I will call you for each urgent reminder, then use Telegram if you do not answer."
+            elif urgent_count:
+                delivery_text = "I will call you for the urgent reminders and use Telegram for the others."
+            else:
+                delivery_text = "I will notify you on Telegram for each one."
+            result["speak"] = f"I created {result['created_count']} reminders. {delivery_text}"
             return
         if result.get("operation") not in {"created", "rescheduled", "snoozed", "canceled"}:
             return
@@ -222,10 +229,12 @@ class VapiCallService:
         else:
             spoken_time = "the revised time"
         if result.get("operation") == "created":
-            result["speak"] = (
-                f"Your reminder, {title}, is set for {spoken_time}. "
-                "I will notify you on Telegram."
+            delivery_text = (
+                "I will call you, then use Telegram if you do not answer twice."
+                if reminder.get("is_urgent")
+                else "I will notify you on Telegram."
             )
+            result["speak"] = f"Your reminder, {title}, is set for {spoken_time}. {delivery_text}"
         elif result.get("operation") == "rescheduled":
             result["speak"] = f"Your reminder, {title}, is now set for {spoken_time}."
         elif result.get("operation") == "snoozed":

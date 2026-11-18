@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     discord_link_ttl_seconds: int = Field(default=600, gt=0)
     vapi_webhook_secret: str | None = None
     vapi_assistant_id: str | None = None
+    vapi_outbound_assistant_id: str | None = None
+    vapi_phone_number_id: str | None = None
     vapi_api_key: str | None = None
     vapi_server_url: str | None = None
     vapi_credential_id: str | None = None
@@ -41,6 +43,9 @@ class Settings(BaseSettings):
     vapi_voice_model: str | None = None
     vapi_assistant_response_mode: str = "message_response"
     vapi_assistant_request_deadline_seconds: float = 6.0
+    urgent_reminders_enabled: bool = False
+    urgent_call_retry_delay_seconds: int = Field(default=30, gt=0)
+    urgent_call_lease_seconds: int = Field(default=90, gt=0)
     google_calendar_client_id: str | None = None
     google_calendar_client_secret: str | None = None
     google_calendar_redirect_uri: str | None = None

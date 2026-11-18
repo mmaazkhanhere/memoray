@@ -1,7 +1,12 @@
 from datetime import datetime, timedelta, timezone
 
 from app.integrations.vapi.assistant import assistant_configuration
-from app.integrations.vapi.router import _assistant_error, _assistant_response, _message_response
+from app.integrations.vapi.router import (
+    _assistant_error,
+    _assistant_response,
+    _message_response,
+    _urgent_outcome,
+)
 from app.integrations.vapi.service import VapiAuthenticationError, VapiCallService
 from app.integrations.vapi.sync import build_payload
 from app.models import (
@@ -44,6 +49,20 @@ def test_vapi_assistant_configuration_is_dynamic_and_shared():
 def test_vapi_server_responses_use_the_message_response_envelope():
     assert _assistant_error("not registered") == {"messageResponse": {"error": "not registered"}}
     assert _message_response({"results": []}) == {"messageResponse": {"results": []}}
+
+
+def test_urgent_vapi_outcome_requires_a_human_or_explicit_connected_end_reason():
+    assert _urgent_outcome({"type": "status-update", "status": "ended"}, {}) == (
+        "failed",
+        "missing_ended_reason",
+    )
+    assert _urgent_outcome({"type": "status-update", "status": "ended"}, {"answeredBy": "human"}) == (
+        "answered",
+        "human",
+    )
+    assert _urgent_outcome(
+        {"type": "end-of-call-report", "endedReason": "customer-did-not-answer"}, {}
+    ) == ("not_picked", "customer-did-not-answer")
 
 
 def test_vapi_assistant_request_selects_saved_riley_assistant():

@@ -31,7 +31,8 @@ and do not claim success.
 When a tool result contains a `speak` value, say that value exactly. Keep replies concise and
 natural
 for speech.
-A reminder created on a call is delivered through the caller's linked Telegram account.
+Normal reminders created on a call are delivered through the caller's linked Telegram account.
+Urgent reminders are called through the linked phone and fall back to Telegram after two missed calls.
 The caller may interrupt you; stop and listen, then process the new utterance as the next turn.
 """
 
@@ -78,3 +79,25 @@ def assistant_configuration(
             voice["model"] = "eleven_flash_v2_5"
         configuration["voice"] = voice
     return configuration
+
+
+OUTBOUND_SYSTEM_PROMPT = """You are Memoray's outbound urgent-reminder caller.
+The first message already greets the person and announces {{reminder_text}}. Do not repeat it.
+End the call immediately after the first message.
+Do not ask questions, manage reminders, collect information, or leave a long conversation.
+"""
+
+
+def outbound_assistant_configuration() -> dict[str, Any]:
+    """Return the intentionally tool-free assistant configuration for urgent calls."""
+    return {
+        "name": "Memoray Urgent Reminder Caller",
+        "firstMessage": "Hi {{user_name}}, this is Memoray calling. {{reminder_text}}",
+        "endCallFunctionEnabled": True,
+        "model": {
+            "provider": "openai",
+            "model": "gpt-4o",
+            "messages": [{"role": "system", "content": OUTBOUND_SYSTEM_PROMPT}],
+            "tools": [],
+        },
+    }
