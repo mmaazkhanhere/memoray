@@ -248,6 +248,34 @@ def test_list_tool_allows_null_optional_filters():
     assert {"type": "string", "format": "date"} in properties["start"]["anyOf"]
 
 
+def test_list_tool_includes_conversational_local_times(db):
+    user = UserService(db).create(UserCreate(name="A", timezone="Asia/Karachi"))
+    reminder = ReminderService(db).create(
+        user.id,
+        ReminderCreate(
+            title="Drink water",
+            schedule=datetime(2099, 11, 18, 6, 21, tzinfo=timezone.utc),
+        ),
+    )
+
+    result = ReminderAgent(
+        FakeProvider(LLMResponse(text="ok")),
+        ReminderService(db),
+        UserService(db),
+        ConversationService(db),
+    )._list(user.id, {})
+
+    listed = result["reminders"][0]
+    assert listed["schedule"] == "Wednesday, November 18 at 11:21 AM (Asia/Karachi)"
+    assert listed["schedule_display"] == "Wednesday, November 18 at 11:21 AM (Asia/Karachi)"
+    assert listed["occurrence"]["schedule"] == listed["schedule_display"]
+    assert listed["occurrence"]["next_due_at"] == listed["schedule_display"]
+    assert listed["occurrence"]["schedule_display"] == listed["schedule_display"]
+    assert listed["occurrence"]["next_due_at_display"] == listed["schedule_display"]
+    assert result["timezone"] == "Asia/Karachi"
+    assert listed["id"] == str(reminder.id)
+
+
 def test_reschedule_tool_is_mutation_only():
     properties = RESCHEDULE_REMINDER_TOOL["function"]["parameters"]["properties"]
     assert RESCHEDULE_REMINDER_TOOL["function"]["parameters"]["required"] == [

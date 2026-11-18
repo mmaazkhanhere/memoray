@@ -28,7 +28,7 @@ from app.schemas import (
     RescheduleScope,
     SnoozeRequest,
 )
-from app.time_utils import to_user_timezone
+from app.time_utils import format_user_datetime, to_user_timezone
 from app.users.service import UserService
 
 SYSTEM_PROMPT = """You are Memoray, a reminder and memory assistant. You create, list, reschedule, cancel, and snooze reminders, and save or retrieve durable user memories.
@@ -63,7 +63,9 @@ memory. If multiple candidates match, ask which one the user means instead of gu
 Do not guess IDs, schedules, or scope. When a discovery tool returns an opaque UUID, copy that exact UUID into the
 next mutation tool call; never substitute placeholders such as `[internal id]`.
 
-**Responses:** For unrelated requests, state that you only manage reminders and memories. After successful tool results, respond warmly
+**Responses:** For unrelated requests, state that you only manage reminders and memories. When listing reminders, use the
+human-readable `schedule_display`, `occurrence.schedule_display`, and `occurrence.next_due_at_display` fields; never show
+raw ISO timestamps or internal IDs. After successful tool results, respond warmly
 in ≤25 words using only the returned information. Reply in conversational, humanized way without emojis
 """
 
@@ -707,13 +709,32 @@ class ReminderAgent:
             return {"operation": "not_retrieved", "error": "The reminder filter was invalid."}
         user = self.users.get(user_id)
         reminders = self.reminders.list_with_occurrences(user_id, query)
+        formatted = []
+        for item, occurrence in reminders:
+            reminder_data = to_response(item, user.timezone, occurrence).model_dump(mode="json")
+            schedule_display = format_user_datetime(item.schedule, user.timezone)
+            # This payload is sent to the language model, so keep the public
+            # schedule value conversational instead of exposing an ISO value
+            # that can be repeated verbatim in the user's response.
+            reminder_data["schedule"] = schedule_display
+            reminder_data["schedule_display"] = schedule_display
+            if reminder_data.get("occurrence"):
+                occurrence_schedule_display = format_user_datetime(
+                    occurrence.schedule, user.timezone
+                )
+                next_due_at_display = format_user_datetime(
+                    occurrence.next_due_at, user.timezone
+                )
+                reminder_data["occurrence"]["schedule"] = occurrence_schedule_display
+                reminder_data["occurrence"]["next_due_at"] = next_due_at_display
+                reminder_data["occurrence"]["schedule_display"] = occurrence_schedule_display
+                reminder_data["occurrence"]["next_due_at_display"] = next_due_at_display
+            formatted.append(reminder_data)
         return {
             "operation": "retrieved",
             "count": len(reminders),
-            "reminders": [
-                to_response(item, user.timezone, occurrence).model_dump(mode="json")
-                for item, occurrence in reminders
-            ],
+            "timezone": user.timezone,
+            "reminders": formatted,
         }
 
     @staticmethod
