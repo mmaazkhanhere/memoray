@@ -97,6 +97,25 @@ The Telegram update ID is claimed before media or STT work, so replaying a voice
 or execute it again. Voice command replies are sent synchronously as Telegram text; scheduled reminder delivery
 remains the responsibility of the separate notification worker.
 
+## Discord channel
+
+Discord is an optional second conversational adapter. Configure
+`DISCORD_BOT_TOKEN`, `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET`, and
+`DISCORD_REDIRECT_URI`, run the API service, and register the
+redirect URI in the Discord Developer Portal. The bot needs Gateway access to
+direct messages and message content.
+
+From a completed Telegram account, send `/connect_discord` (or `/connect discord`).
+Memoray returns a single-use Discord authorization URL valid for ten minutes.
+The callback links the authorized Discord user to the existing Memoray user and
+opens their bot DM; it never creates a second Memoray account. After linking,
+send the bot a direct message to create and manage the same memories and
+reminders available on Telegram. Discord server messages are ignored in this
+initial adapter; scheduled Discord reminder notifications use the linked DM
+destination and the existing durable notification worker. When
+`DISCORD_BOT_TOKEN` is configured, the API service starts the Discord Gateway
+loop automatically; no additional service is required.
+
 ## Vapi phone channel
 
 Vapi is an adapter over the same reminder and memory services. Configure the required `VAPI_WEBHOOK_SECRET`, run
