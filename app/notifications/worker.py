@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from app.db import SessionLocal
+from app.config import get_settings
 from app.models import DeliveryChannel, NotificationDelivery, NotificationStatus
 from app.notifications.service import NotificationService
 from app.integrations.telegram.adapter import (
@@ -16,6 +17,8 @@ from app.integrations.telegram.adapter import (
 from app.integrations.discord.client import DiscordClient
 from app.integrations.discord.errors import DiscordDeliveryError
 from app.integrations.google_calendar.worker import GoogleCalendarWorker
+from app.urgent_reminders.vapi_client import VapiOutboundClient
+from app.urgent_reminders.worker import UrgentReminderWorker
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +147,23 @@ class NotificationWorker:
             calendar_processed = GoogleCalendarWorker(calendar_db).run_once()
         finally:
             calendar_db.close()
-        return len(claimed_data) + calendar_processed
+        urgent_processed = 0
+        settings = get_settings()
+        if (
+            settings.urgent_reminders_enabled
+            and settings.vapi_api_key
+            and settings.vapi_outbound_assistant_id
+            and settings.vapi_phone_number_id
+        ):
+            urgent_processed = UrgentReminderWorker(
+                client=VapiOutboundClient(
+                    api_key=settings.vapi_api_key,
+                    assistant_id=settings.vapi_outbound_assistant_id,
+                    phone_number_id=settings.vapi_phone_number_id,
+                ),
+                session_factory=self.session_factory,
+            ).run_once()
+        return len(claimed_data) + calendar_processed + urgent_processed
 
     def _finalize(self, db, notification_id, exc, classification: str | None = None) -> None:
         error = str(exc)
