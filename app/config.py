@@ -6,6 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://memoray:memoray@localhost:5432/memoray"
+    database_url_pd: str | None = None
     groq_api_key: str | None = None
     groq_model: str = "openai/gpt-oss-120b"
     stt_provider: str = "groq"
@@ -63,6 +64,19 @@ class Settings(BaseSettings):
     mcp_link_ttl_seconds: int = Field(default=600, gt=0)
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @property
+    def active_database_url(self) -> str:
+        """Return the database URL for the current environment."""
+        if self.app_env.casefold() in {"production", "prod"}:
+            if not self.database_url_pd:
+                raise ValueError("DATABASE_URL_PD is required in production")
+            url = self.database_url_pd
+        else:
+            url = self.database_url
+        if url.startswith("postgresql://"):
+            return "postgresql+psycopg://" + url[len("postgresql://") :]
+        return url
 
 
 @lru_cache
