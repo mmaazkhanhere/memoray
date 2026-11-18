@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.models import (
     ChannelIdentity,
     ChannelIdentityStatus,
+    ChannelKind,
     OccurrenceStatus,
     RecurrenceFrequency,
     Reminder,
@@ -20,7 +21,7 @@ from app.models import (
 from app.notifications.service import NotificationService
 from app.reminders.errors import DuplicateReminderError, ReminderInPastError
 from app.reminders.changes import queue_occurrence_change
-from app.reminders.destinations import DestinationService
+from app.reminders.destinations import DestinationService, default_telegram_identity
 from app.recurrence.schedule import next_occurrence
 from app.schemas import ReminderCreate, ReminderListStatus, ReminderQuery
 from app.time_utils import to_utc
@@ -107,17 +108,14 @@ class ReminderService:
         try:
             self.db.flush()
             occurrence = reminder.occurrences[0]
-            identity = notification_identity
-            if identity is None and data.destination_id is None:
-                identity = self.db.scalar(
-                    select(ChannelIdentity)
-                    .where(
-                        ChannelIdentity.user_id == user.id,
-                        ChannelIdentity.status == ChannelIdentityStatus.linked,
-                        ChannelIdentity.is_default.is_(True),
-                    )
-                    .order_by(ChannelIdentity.created_at.asc())
-                )
+            identity = (
+                notification_identity
+                if notification_identity is not None
+                and notification_identity.channel == ChannelKind.telegram
+                else None
+            )
+            if data.destination_id is None:
+                identity = identity or default_telegram_identity(self.db, user.id)
             NotificationService(self.db).schedule(
                 reminder,
                 occurrence,

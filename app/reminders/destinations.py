@@ -3,7 +3,13 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import DeliveryChannel, DeliveryDestination
+from app.models import (
+    ChannelIdentity,
+    ChannelIdentityStatus,
+    ChannelKind,
+    DeliveryChannel,
+    DeliveryDestination,
+)
 from app.reminders.errors import InvalidDestinationError
 from app.schemas import DeliveryDestinationCreate
 
@@ -83,3 +89,16 @@ class DestinationService:
             raise ValueError("webhook destination identity must be an http URL")
         if channel == DeliveryChannel.sms and not any(char.isdigit() for char in identity):
             raise ValueError("sms destination identity is invalid")
+
+
+def default_telegram_identity(db: Session, user_id: uuid.UUID) -> ChannelIdentity | None:
+    """Return the user's linked Telegram identity used for default deliveries."""
+    return db.scalar(
+        select(ChannelIdentity)
+        .where(
+            ChannelIdentity.user_id == user_id,
+            ChannelIdentity.channel == ChannelKind.telegram,
+            ChannelIdentity.status == ChannelIdentityStatus.linked,
+        )
+        .order_by(ChannelIdentity.is_default.desc(), ChannelIdentity.created_at.asc())
+    )

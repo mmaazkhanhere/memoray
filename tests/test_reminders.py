@@ -3,7 +3,15 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from app.models import OccurrenceStatus, RecurrenceFrequency, ReminderStatus
+from app.models import (
+    ChannelIdentity,
+    ChannelIdentityStatus,
+    ChannelKind,
+    NotificationDelivery,
+    OccurrenceStatus,
+    RecurrenceFrequency,
+    ReminderStatus,
+)
 from app.reminders.errors import DuplicateReminderError, ReminderInPastError
 from app.reminders.service import ReminderService
 from app.schemas import ReminderCreate, ReminderListStatus, ReminderQuery, UserCreate
@@ -21,6 +29,42 @@ def test_create_stores_utc_and_pending_occurrence(db):
     assert reminder.schedule.hour == 4
     assert reminder.status == ReminderStatus.active
     assert reminder.occurrences[0].status == OccurrenceStatus.pending
+
+
+def test_discord_context_still_uses_telegram_for_default_delivery(db):
+    user = UserService(db).create(UserCreate(name="A", timezone="UTC"))
+    telegram = ChannelIdentity(
+        user_id=user.id,
+        channel=ChannelKind.telegram,
+        external_principal_id="telegram-user",
+        external_destination_id="telegram-chat",
+        status=ChannelIdentityStatus.linked,
+        is_default=True,
+    )
+    discord = ChannelIdentity(
+        user_id=user.id,
+        channel=ChannelKind.discord,
+        external_principal_id="discord-user",
+        external_destination_id="discord-chat",
+        status=ChannelIdentityStatus.linked,
+        is_default=True,
+    )
+    db.add_all([telegram, discord])
+    db.commit()
+
+    reminder = ReminderService(db).create(
+        user.id,
+        ReminderCreate(
+            title="Drink water",
+            schedule=datetime.now(timezone.utc) + timedelta(hours=1),
+        ),
+        notification_identity=discord,
+    )
+
+    notification = db.query(NotificationDelivery).one()
+    assert reminder.destination_id is not None
+    assert notification.channel.value == "telegram"
+    assert notification.destination_snapshot == "telegram-chat"
 
 
 def test_list_filters_by_title_and_status(db):

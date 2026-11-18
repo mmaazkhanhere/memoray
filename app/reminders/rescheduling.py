@@ -7,13 +7,14 @@ from sqlalchemy.orm import Session, selectinload
 from app.models import (
     ChannelIdentity,
     ChannelIdentityStatus,
+    ChannelKind,
     OccurrenceStatus,
     Reminder,
     ReminderOccurrence,
     ReminderStatus,
 )
 from app.notifications.service import NotificationService
-from app.reminders.destinations import DestinationService
+from app.reminders.destinations import DestinationService, default_telegram_identity
 from app.reminders.errors import (
     InvalidDestinationError,
     OccurrenceNotPendingError,
@@ -108,21 +109,18 @@ class ReminderRescheduler:
             reminder.series_anchor_schedule = schedule
 
         reminder.destination_id = destination.id
-        identity = notification_identity
+        identity = (
+            notification_identity
+            if notification_identity is not None
+            and notification_identity.channel == ChannelKind.telegram
+            else None
+        )
         if identity is not None and (
             identity.user_id != user_id or identity.status != ChannelIdentityStatus.linked
         ):
             raise InvalidDestinationError("notification identity is not linked")
-        if identity is None and request.destination_id is None:
-            identity = self.db.scalar(
-                select(ChannelIdentity)
-                .where(
-                    ChannelIdentity.user_id == user_id,
-                    ChannelIdentity.status == ChannelIdentityStatus.linked,
-                    ChannelIdentity.is_default.is_(True),
-                )
-                .order_by(ChannelIdentity.created_at.asc())
-            )
+        if request.destination_id is None:
+            identity = identity or default_telegram_identity(self.db, user_id)
         for pending_occurrence in (
             [occurrence]
             if scope == RescheduleScope.occurrence

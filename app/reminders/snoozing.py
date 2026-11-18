@@ -4,8 +4,16 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models import ChannelIdentity, ChannelIdentityStatus, OccurrenceStatus, Reminder, ReminderStatus
+from app.models import (
+    ChannelIdentity,
+    ChannelIdentityStatus,
+    ChannelKind,
+    OccurrenceStatus,
+    Reminder,
+    ReminderStatus,
+)
 from app.notifications.service import NotificationService
+from app.reminders.destinations import default_telegram_identity
 from app.reminders.errors import OccurrenceNotNotifiedError, ReminderNotActiveError
 from app.reminders.changes import queue_occurrence_change
 from app.schemas import SnoozeRequest
@@ -43,17 +51,13 @@ class ReminderSnoozer:
             raise OccurrenceNotNotifiedError("only notified occurrences can be snoozed")
         occurrence.next_due_at = datetime.now(timezone.utc) + timedelta(seconds=request.duration_seconds)
         occurrence.status = OccurrenceStatus.pending
-        identity = notification_identity
-        if identity is None:
-            identity = self.db.scalar(
-                select(ChannelIdentity)
-                .where(
-                    ChannelIdentity.user_id == user_id,
-                    ChannelIdentity.status == ChannelIdentityStatus.linked,
-                    ChannelIdentity.is_default.is_(True),
-                )
-                .order_by(ChannelIdentity.created_at.asc())
-            )
+        identity = (
+            notification_identity
+            if notification_identity is not None
+            and notification_identity.channel == ChannelKind.telegram
+            else None
+        )
+        identity = identity or default_telegram_identity(self.db, user_id)
         if identity is not None and (
             identity.user_id != user_id or identity.status != ChannelIdentityStatus.linked
         ):

@@ -7,14 +7,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import (
-    ChannelIdentity,
-    ChannelIdentityStatus,
     OccurrenceStatus,
     Reminder,
     ReminderOccurrence,
     ReminderStatus,
 )
 from app.notifications.service import NotificationService
+from app.reminders.destinations import default_telegram_identity
 from app.reminders.occurrences import advance_recurring_occurrence
 from app.reminders.changes import queue_occurrence_changes
 from app.users.service import UserService
@@ -74,15 +73,7 @@ class CompletionService:
         if reminder.is_recurring and reminder.recurrence_frequency:
             successor = advance_recurring_occurrence(reminder, occurrence, user.timezone)
             reminder.schedule = successor.schedule
-            identity = self.db.scalar(
-                select(ChannelIdentity)
-                .where(
-                    ChannelIdentity.user_id == user.id,
-                    ChannelIdentity.status == ChannelIdentityStatus.linked,
-                    ChannelIdentity.is_default.is_(True),
-                )
-                .order_by(ChannelIdentity.created_at.asc())
-            )
+            identity = default_telegram_identity(self.db, user.id)
             destination = reminder.destination
             NotificationService(self.db).schedule(
                 reminder,
