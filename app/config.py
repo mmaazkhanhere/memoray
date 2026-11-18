@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     telegram_bot_token: str | None = None
     telegram_bot_username: str | None = None
     telegram_webhook_secret: str | None = None
+    discord_bot_token: str | None = None
+    discord_client_id: str | None = None
+    discord_client_secret: str | None = None
+    discord_redirect_uri: str | None = None
+    discord_link_ttl_seconds: int = Field(default=600, gt=0)
     vapi_webhook_secret: str | None = None
     vapi_assistant_id: str | None = None
     vapi_api_key: str | None = None

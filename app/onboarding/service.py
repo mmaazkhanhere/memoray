@@ -18,6 +18,8 @@ from app.models import (
 from app.phones.service import PhoneService
 from app.time_utils import validate_timezone
 from app.mcp.auth.service import McpAuthService, OAuthError
+from app.integrations.discord.errors import DiscordNotConfigured
+from app.integrations.discord.linking import DiscordLinkService
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,8 @@ class OnboardingService:
             return self._connect_chatgpt(account, nonce)
         if command in {"/connect_calendar", "/connect calendar"}:
             return self._calendar_connect(account)
+        if command in {"/connect_discord", "/connect discord"}:
+            return self._discord_connect(account)
         if message.contact is not None:
             return self._phone_decision(account, message)
         if command not in {"/link phone", "/link_phone", "/add phone", "/phone"}:
@@ -324,6 +328,17 @@ class OnboardingService:
             [self._reply(account, service.connect_command(account.user.id))],
             True,
         )
+
+    def _discord_connect(self, account: ChannelAccount) -> OnboardingResult:
+        try:
+            url = DiscordLinkService(self.db).begin(account.user.id)
+            text = (
+                "Open this link to connect your Discord account (it expires in 10 minutes):\n"
+                f"{url}\n\nAfter authorizing, send a direct message to the Memoray Discord bot."
+            )
+        except DiscordNotConfigured:
+            text = "Discord is not configured yet. You can continue using Memoray on Telegram."
+        return OnboardingResult(account, [self._reply(account, text)], True)
 
     @staticmethod
     def _reply(

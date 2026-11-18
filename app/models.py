@@ -41,11 +41,13 @@ class DeliveryChannel(str, enum.Enum):
     sms = "sms"
     webhook = "webhook"
     telegram = "telegram"
+    discord = "discord"
     phone = "phone"
 
 
 class ChannelKind(str, enum.Enum):
     telegram = "telegram"
+    discord = "discord"
     phone = "phone"
 
 
@@ -418,6 +420,21 @@ class GoogleCalendarOAuthAttempt(Base):
 
     __tablename__ = "google_calendar_oauth_attempts"
     __table_args__ = (Index("uq_google_calendar_oauth_attempts_state", "state_hash", unique=True),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    state_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    code_verifier: Mapped[str] = mapped_column(String(200), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DiscordLinkAttempt(Base):
+    """Single-use OAuth state used to link a Discord identity to a Memoray user."""
+
+    __tablename__ = "discord_link_attempts"
+    __table_args__ = (Index("uq_discord_link_attempts_state_hash", "state_hash", unique=True),)
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
