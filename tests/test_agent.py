@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from app.llm.protocol import LLMResponse, ToolCall
-from app.agent.service import ReminderAgent
+from app.agent.service import ReminderAgent, SYSTEM_PROMPT
 from app.agent.tools import LIST_REMINDERS_TOOL, RESCHEDULE_REMINDER_TOOL
 from app.conversations.service import ConversationService
 from app.reminders.service import ReminderService
@@ -17,6 +17,23 @@ class FakeProvider:
     def complete(self, messages, tools):
         self.calls.append((messages, tools))
         return self.responses.pop(0)
+
+
+def test_system_prompt_includes_cross_channel_setup_guidance():
+    for value in (
+        "Telegram",
+        "Discord",
+        "Vapi",
+        "ChatGPT/MCP",
+        "Google Calendar",
+        "/start",
+        "/link phone",
+        "/connect_discord",
+        "/connect_calendar",
+        "/connect_chatgpt <approval-code>",
+        "+1 878 284 2928",
+    ):
+        assert value in SYSTEM_PROMPT
 
 
 def future_date(days: int = 1) -> str:
