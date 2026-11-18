@@ -48,6 +48,7 @@ class ReminderCreate(BaseModel):
     recurrence_rule: str | None = None
     recurrence_frequency: RecurrenceFrequency | None = None
     recurrence_interval: int = Field(default=1, ge=1, le=365)
+    is_urgent: bool = False
     destination_id: uuid.UUID | None = None
 
     @field_validator("title")
@@ -135,6 +136,7 @@ class ReminderResponse(BaseModel):
     recurrence_rule: str | None
     recurrence_frequency: RecurrenceFrequency | None
     recurrence_interval: int
+    is_urgent: bool
     destination_id: uuid.UUID | None = None
     status: ReminderStatus
     occurrence: OccurrenceResponse | None = None

@@ -35,6 +35,24 @@ class NotificationStatus(str, enum.Enum):
     canceled = "canceled"
 
 
+class UrgentDeliveryStatus(str, enum.Enum):
+    pending = "pending"
+    calling = "calling"
+    retry_pending = "retry_pending"
+    delivered = "delivered"
+    telegram_queued = "telegram_queued"
+    failed = "failed"
+    canceled = "canceled"
+
+
+class UrgentCallStatus(str, enum.Enum):
+    dispatching = "dispatching"
+    ringing = "ringing"
+    answered = "answered"
+    not_picked = "not_picked"
+    failed = "failed"
+
+
 class DeliveryChannel(str, enum.Enum):
     in_app = "in_app"
     email = "email"
@@ -599,6 +617,7 @@ class Reminder(Base):
         Enum(RecurrenceFrequency, name="recurrence_frequency"), nullable=True
     )
     recurrence_interval: Mapped[int] = mapped_column(default=1, nullable=False)
+    is_urgent: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     destination_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("delivery_destinations.id", ondelete="SET NULL"), nullable=True
     )
@@ -637,6 +656,76 @@ class ReminderOccurrence(Base):
     notification_deliveries: Mapped[list["NotificationDelivery"]] = relationship(
         back_populates="occurrence", cascade="all, delete-orphan"
     )
+    urgent_delivery: Mapped["UrgentReminderDelivery | None"] = relationship(
+        back_populates="occurrence", uselist=False, cascade="all, delete-orphan"
+    )
+
+
+class UrgentReminderDelivery(Base):
+    """Durable state machine for an urgent occurrence's outbound call escalation."""
+
+    __tablename__ = "urgent_reminder_deliveries"
+    __table_args__ = (
+        Index("uq_urgent_reminder_deliveries_occurrence", "occurrence_id", unique=True),
+        Index("ix_urgent_reminder_deliveries_due", "status", "next_attempt_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    reminder_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("reminders.id", ondelete="CASCADE"), nullable=False)
+    occurrence_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("reminder_occurrences.id", ondelete="CASCADE"), nullable=False
+    )
+    phone_snapshot: Mapped[str] = mapped_column(String(32), nullable=False)
+    telegram_snapshot: Mapped[str] = mapped_column(String(200), nullable=False)
+    status: Mapped[UrgentDeliveryStatus] = mapped_column(
+        Enum(UrgentDeliveryStatus, name="urgent_delivery_status"),
+        default=UrgentDeliveryStatus.pending,
+        nullable=False,
+    )
+    attempt_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    worker_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    reminder: Mapped[Reminder] = relationship()
+    occurrence: Mapped[ReminderOccurrence] = relationship(back_populates="urgent_delivery")
+    attempts: Mapped[list["UrgentCallAttempt"]] = relationship(
+        back_populates="delivery", cascade="all, delete-orphan", order_by="UrgentCallAttempt.attempt_number"
+    )
+
+
+class UrgentCallAttempt(Base):
+    """One provider call request; callbacks may be delivered more than once."""
+
+    __tablename__ = "urgent_call_attempts"
+    __table_args__ = (
+        Index("uq_urgent_call_attempts_external_id", "external_call_id", unique=True),
+        Index("uq_urgent_call_attempts_correlation_key", "correlation_key", unique=True),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    delivery_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("urgent_reminder_deliveries.id", ondelete="CASCADE"), nullable=False
+    )
+    attempt_number: Mapped[int] = mapped_column(nullable=False)
+    correlation_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    external_call_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    status: Mapped[UrgentCallStatus] = mapped_column(
+        Enum(UrgentCallStatus, name="urgent_call_status"),
+        default=UrgentCallStatus.dispatching,
+        nullable=False,
+    )
+    outcome: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    delivery: Mapped[UrgentReminderDelivery] = relationship(back_populates="attempts")
 
 
 class NotificationDelivery(Base):
@@ -754,6 +843,7 @@ class ReminderDraft(Base):
         Enum(RecurrenceFrequency, name="recurrence_frequency"), nullable=True
     )
     recurrence_interval: Mapped[int] = mapped_column(default=1, nullable=False)
+    is_urgent: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[DraftStatus] = mapped_column(
         Enum(DraftStatus, name="draft_status"), default=DraftStatus.collecting, nullable=False
     )
