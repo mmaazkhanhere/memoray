@@ -44,6 +44,7 @@ UPDATE_REMINDER_DRAFT_TOOL = {
                         {"type": "null"},
                     ]
                 },
+                "urgent": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
             },
             "additionalProperties": False,
         },
@@ -72,6 +73,7 @@ CREATE_REMINDER_TOOL = {
                         {"type": "null"},
                     ]
                 },
+                "urgent": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
             },
             "additionalProperties": False,
         },
@@ -106,6 +108,7 @@ CREATE_REMINDERS_TOOL = {
                                     {"type": "null"},
                                 ]
                             },
+                            "urgent": {"type": "boolean"},
                         },
                         "required": ["title", "date", "time"],
                         "additionalProperties": False,

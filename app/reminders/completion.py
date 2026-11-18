@@ -13,6 +13,7 @@ from app.models import (
     ReminderStatus,
 )
 from app.notifications.service import NotificationService
+from app.urgent_reminders.service import UrgentReminderService
 from app.reminders.destinations import default_telegram_identity
 from app.reminders.occurrences import advance_recurring_occurrence
 from app.reminders.changes import queue_occurrence_changes
@@ -75,19 +76,22 @@ class CompletionService:
             reminder.schedule = successor.schedule
             identity = default_telegram_identity(self.db, user.id)
             destination = reminder.destination
-            NotificationService(self.db).schedule(
-                reminder,
-                successor,
-                content=f"Reminder: {reminder.title}",
-                identity=identity,
-                channel=None if identity else destination.channel if destination else None,
-                destination_id=reminder.destination_id,
-                destination_snapshot=(
-                    identity.external_destination_id
-                    if identity is not None
-                    else destination.identity if destination else None
-                ),
-            )
+            if reminder.is_urgent:
+                UrgentReminderService(self.db).plan(reminder, successor, telegram_identity=identity)
+            else:
+                NotificationService(self.db).schedule(
+                    reminder,
+                    successor,
+                    content=f"Reminder: {reminder.title}",
+                    identity=identity,
+                    channel=None if identity else destination.channel if destination else None,
+                    destination_id=reminder.destination_id,
+                    destination_snapshot=(
+                        identity.external_destination_id
+                        if identity is not None
+                        else destination.identity if destination else None
+                    ),
+                )
         else:
             reminder.status = ReminderStatus.completed
 

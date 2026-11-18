@@ -43,6 +43,7 @@ class ConversationService:
                 conversation.draft.is_recurring = False
                 conversation.draft.recurrence_frequency = None
                 conversation.draft.recurrence_interval = 1
+                conversation.draft.is_urgent = False
                 conversation.draft.status = DraftStatus.collecting
             if commit:
                 self.db.commit()
@@ -90,6 +91,7 @@ class ConversationService:
         is_recurring: bool | None = None,
         recurrence_frequency: RecurrenceFrequency | None = None,
         recurrence_interval: int | None = None,
+        is_urgent: bool | None = None,
         commit: bool = True,
     ) -> ReminderDraft:
         if draft.status in {DraftStatus.created, DraftStatus.canceled}:
@@ -99,6 +101,7 @@ class ConversationService:
             draft.is_recurring = False
             draft.recurrence_frequency = None
             draft.recurrence_interval = 1
+            draft.is_urgent = False
         if title is not None:
             draft.title = title.strip()
         if schedule_date is not None:
@@ -113,6 +116,8 @@ class ConversationService:
             draft.recurrence_frequency = recurrence_frequency
         if recurrence_interval is not None:
             draft.recurrence_interval = recurrence_interval
+        if is_urgent is not None:
+            draft.is_urgent = is_urgent
         draft.status = DraftStatus.ready if self.is_complete(draft) else DraftStatus.collecting
         self.db.add(draft)
         if commit:

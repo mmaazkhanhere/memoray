@@ -13,6 +13,7 @@ from app.models import (
     ReminderStatus,
 )
 from app.notifications.service import NotificationService
+from app.urgent_reminders.service import UrgentReminderService
 from app.reminders.destinations import default_telegram_identity
 from app.reminders.errors import OccurrenceNotNotifiedError, ReminderNotActiveError
 from app.reminders.changes import queue_occurrence_change
@@ -62,19 +63,23 @@ class ReminderSnoozer:
             identity.user_id != user_id or identity.status != ChannelIdentityStatus.linked
         ):
             raise ValueError("notification identity is not linked")
-        NotificationService(self.db).replace_pending(
-            reminder,
-            occurrence,
-            content=f"Reminder: {reminder.title}",
-            identity=identity,
-            channel=None if identity else reminder.destination.channel if reminder.destination else None,
-            destination_id=reminder.destination_id,
-            destination_snapshot=(
-                identity.external_destination_id
-                if identity is not None
-                else reminder.destination.identity if reminder.destination else None
-            ),
-        )
+        if reminder.is_urgent:
+            UrgentReminderService(self.db).cancel_for_occurrence(occurrence.id)
+            UrgentReminderService(self.db).plan(reminder, occurrence, telegram_identity=identity)
+        else:
+            NotificationService(self.db).replace_pending(
+                reminder,
+                occurrence,
+                content=f"Reminder: {reminder.title}",
+                identity=identity,
+                channel=None if identity else reminder.destination.channel if reminder.destination else None,
+                destination_id=reminder.destination_id,
+                destination_snapshot=(
+                    identity.external_destination_id
+                    if identity is not None
+                    else reminder.destination.identity if reminder.destination else None
+                ),
+            )
         queue_occurrence_change(self.db, occurrence.id)
         self.db.commit()
         self.db.refresh(reminder)

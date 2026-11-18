@@ -19,6 +19,7 @@ from app.models import (
     ReminderStatus,
 )
 from app.notifications.service import NotificationService
+from app.urgent_reminders.service import UrgentReminderService
 from app.reminders.errors import DuplicateReminderError, ReminderInPastError
 from app.reminders.changes import queue_occurrence_change
 from app.reminders.destinations import DestinationService, default_telegram_identity
@@ -92,6 +93,7 @@ class ReminderService:
             recurrence_rule=data.recurrence_rule,
             recurrence_frequency=data.recurrence_frequency,
             recurrence_interval=data.recurrence_interval,
+            is_urgent=data.is_urgent,
             destination_id=destination.id,
             series_anchor_schedule=schedule,
             status=ReminderStatus.active,
@@ -116,24 +118,33 @@ class ReminderService:
             )
             if data.destination_id is None:
                 identity = identity or default_telegram_identity(self.db, user.id)
-            NotificationService(self.db).schedule(
-                reminder,
-                occurrence,
-                content=f"Reminder: {reminder.title}",
-                identity=identity,
-                channel=None if identity else destination.channel,
-                destination_id=destination.id if destination else None,
-                destination_snapshot=(
-                    identity.external_destination_id
-                    if identity is not None
-                    else destination.identity
-                ),
-            )
+            if reminder.is_urgent:
+                UrgentReminderService(self.db).plan(reminder, occurrence, telegram_identity=identity)
+            else:
+                NotificationService(self.db).schedule(
+                    reminder,
+                    occurrence,
+                    content=f"Reminder: {reminder.title}",
+                    identity=identity,
+                    channel=None if identity else destination.channel,
+                    destination_id=destination.id if destination else None,
+                    destination_snapshot=(
+                        identity.external_destination_id
+                        if identity is not None
+                        else destination.identity
+                    ),
+                )
             queue_occurrence_change(self.db, occurrence.id)
             self.db.commit()
         except IntegrityError as exc:
             self.db.rollback()
             raise DuplicateReminderError("an active reminder with the same title and schedule already exists") from exc
+        except ValueError:
+            # Urgent delivery prerequisites are validated while the reminder
+            # is being assembled; do not leave a partially created reminder in
+            # the caller's transaction when they are missing.
+            self.db.rollback()
+            raise
         self.db.refresh(reminder)
         return reminder
 
@@ -146,6 +157,7 @@ class ReminderService:
         schedule_time: time,
         recurrence_frequency: RecurrenceFrequency | None,
         recurrence_interval: int = 1,
+        is_urgent: bool = False,
         notification_identity: ChannelIdentity | None = None,
     ) -> Reminder:
         user = self.users.get(user_id)
@@ -164,6 +176,7 @@ class ReminderService:
                 is_recurring=recurrence_frequency is not None,
                 recurrence_frequency=recurrence_frequency,
                 recurrence_interval=recurrence_interval,
+                is_urgent=is_urgent,
             ),
             notification_identity=notification_identity,
         )

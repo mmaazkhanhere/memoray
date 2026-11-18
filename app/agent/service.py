@@ -34,8 +34,9 @@ from app.users.service import UserService
 SYSTEM_PROMPT = """You are Memoray, a reminder and memory assistant. You create, list, reschedule, cancel, and snooze reminders, and save or retrieve durable user memories.
 
 **Creation:** Require title, date, and time; recurring reminders also require frequency (daily, weekly, monthly, yearly)
-and optional interval. Use the draft tool for missing fields and `create_reminders` for multiple complete requests. Never
-invent values. Resolve relative times using the user's timezone and current time.
+and optional interval. Mark a reminder urgent only when the user explicitly asks for it. Urgent reminders call the
+linked phone at most twice, then send a Telegram escalation if nobody answers. Use the draft tool for missing fields and
+`create_reminders` for multiple complete requests. Never invent values. Resolve relative times using the user's timezone and current time.
 
 **Completion:** When the user says Done, finished, or otherwise confirms a delivered reminder, call
 `complete_delivered_occurrence`. Include the reminder title when present. Complete only one delivered occurrence;
@@ -481,6 +482,7 @@ class ReminderAgent:
                 is_recurring=arguments.get("recurring"),
                 recurrence_frequency=frequency,
                 recurrence_interval=recurrence_interval,
+                is_urgent=arguments.get("urgent"),
                 commit=commit,
             )
         except (KeyError, TypeError, ValueError, ValidationError):
@@ -634,12 +636,15 @@ class ReminderAgent:
                 schedule_time=draft.schedule_time,
                 recurrence_frequency=draft.recurrence_frequency if draft.is_recurring else None,
                 recurrence_interval=draft.recurrence_interval,
+                is_urgent=draft.is_urgent,
                 notification_identity=self.notification_identity,
             )
         except ReminderInPastError:
             return {"operation": "not_created", "error": "The reminder time must be strictly in the future."}
         except DuplicateReminderError:
             return {"operation": "not_created", "error": "An equivalent active reminder already exists."}
+        except ValueError as exc:
+            return {"operation": "not_created", "error": str(exc)}
         self.conversations.mark_created(draft, conversation, commit=commit)
         user = self.users.get(user_id)
         return {
@@ -677,6 +682,7 @@ class ReminderAgent:
                     schedule_time=schedule_time,
                     recurrence_frequency=frequency,
                     recurrence_interval=recurrence_interval,
+                    is_urgent=bool(item.get("urgent", False)),
                     notification_identity=self.notification_identity,
                 )
                 created.append(to_response(reminder, user.timezone).model_dump(mode="json"))
@@ -748,6 +754,7 @@ class ReminderAgent:
             if draft.recurrence_frequency
             else None,
             "recurrence_interval": draft.recurrence_interval,
+            "urgent": draft.is_urgent,
             "status": draft.status.value,
         }
 

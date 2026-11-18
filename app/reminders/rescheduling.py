@@ -14,6 +14,7 @@ from app.models import (
     ReminderStatus,
 )
 from app.notifications.service import NotificationService
+from app.urgent_reminders.service import UrgentReminderService
 from app.reminders.destinations import DestinationService, default_telegram_identity
 from app.reminders.errors import (
     InvalidDestinationError,
@@ -126,17 +127,23 @@ class ReminderRescheduler:
             if scope == RescheduleScope.occurrence
             else [item for item in reminder.occurrences if item.status == OccurrenceStatus.pending]
         ):
-            NotificationService(self.db).replace_pending(
-                reminder,
-                pending_occurrence,
-                content=f"Reminder: {reminder.title}",
-                identity=identity,
-                channel=None if identity else destination.channel,
-                destination_id=destination.id,
-                destination_snapshot=(
-                    identity.external_destination_id if identity is not None else destination.identity
-                ),
-            )
+            if reminder.is_urgent:
+                UrgentReminderService(self.db).cancel_for_occurrence(pending_occurrence.id)
+                UrgentReminderService(self.db).plan(
+                    reminder, pending_occurrence, telegram_identity=identity
+                )
+            else:
+                NotificationService(self.db).replace_pending(
+                    reminder,
+                    pending_occurrence,
+                    content=f"Reminder: {reminder.title}",
+                    identity=identity,
+                    channel=None if identity else destination.channel,
+                    destination_id=destination.id,
+                    destination_snapshot=(
+                        identity.external_destination_id if identity is not None else destination.identity
+                    ),
+                )
         queue_occurrence_changes(
             self.db,
             [

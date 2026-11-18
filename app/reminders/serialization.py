@@ -25,6 +25,7 @@ def to_response(
         recurrence_rule=reminder.recurrence_rule,
         recurrence_frequency=reminder.recurrence_frequency,
         recurrence_interval=reminder.recurrence_interval,
+        is_urgent=reminder.is_urgent,
         destination_id=reminder.destination_id,
         status=reminder.status,
         occurrence=occurrence_response,
