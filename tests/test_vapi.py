@@ -19,6 +19,7 @@ from app.models import (
     NotificationDelivery,
     NotificationStatus,
     PhoneLink,
+    VapiCallStatus,
 )
 from app.schemas import UserCreate
 from app.users.service import UserService
@@ -173,6 +174,30 @@ def test_vapi_rejects_unknown_and_missing_callers(db):
             pass
         else:
             raise AssertionError("unknown caller must fail closed")
+
+
+def test_vapi_tool_call_authenticates_lazily_when_assistant_request_was_skipped(db):
+    linked_user(db)
+    service = VapiCallService(db)
+
+    call = service.authenticated_call("tool-only-call", "+14155550123")
+
+    assert call.external_call_id == "tool-only-call"
+    assert call.status == VapiCallStatus.active
+
+
+def test_vapi_tool_call_does_not_reactivate_an_ended_call(db):
+    linked_user(db)
+    service = VapiCallService(db)
+    call = service.authenticate_caller("ended-call", "+14155550123")
+    service.end_call(call.external_call_id)
+
+    try:
+        service.authenticated_call(call.external_call_id, "+14155550123")
+    except VapiAuthenticationError as exc:
+        assert str(exc) == "This call is not active."
+    else:
+        raise AssertionError("ended calls must not be reactivated")
 
 
 def test_vapi_tool_retry_is_idempotent_and_correction_replaces_delivery(db):

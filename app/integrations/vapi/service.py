@@ -108,7 +108,15 @@ class VapiCallService:
 
     def authenticated_call(self, external_call_id: str, raw_number: str | None) -> VapiCall:
         call = self.db.scalar(select(VapiCall).where(VapiCall.external_call_id == external_call_id))
-        if call is None or call.status != VapiCallStatus.active:
+        if call is None:
+            # Some Vapi configurations send tool-calls without first delivering
+            # assistant-request to the same Server URL.  Authenticate and create
+            # the call session lazily from the linked phone identity, while still
+            # failing closed when the caller cannot be identified.
+            if not raw_number:
+                raise VapiAuthenticationError("This call could not be authenticated.")
+            return self.authenticate_caller(external_call_id, raw_number)
+        if call.status != VapiCallStatus.active:
             raise VapiAuthenticationError("This call is not active.")
         if not raw_number:
             return call
