@@ -5,6 +5,7 @@ from app.integrations.vapi.router import (
     _assistant_error,
     _assistant_response,
     _message_response,
+    _tool_results_response,
     _urgent_outcome,
 )
 from app.integrations.vapi.service import VapiAuthenticationError, VapiCallService
@@ -46,9 +47,12 @@ def test_vapi_assistant_configuration_is_dynamic_and_shared():
     assert len(configuration["model"]["tools"]) == 10
 
 
-def test_vapi_server_responses_use_the_message_response_envelope():
+def test_vapi_server_responses_use_the_correct_envelope_for_each_message_type():
     assert _assistant_error("not registered") == {"messageResponse": {"error": "not registered"}}
     assert _message_response({"results": []}) == {"messageResponse": {"results": []}}
+    assert _tool_results_response(
+        [{"toolCallId": "call-1", "result": '{"operation":"retrieved"}'}]
+    ) == {"results": [{"toolCallId": "call-1", "result": '{"operation":"retrieved"}'}]}
 
 
 def test_urgent_vapi_outcome_requires_a_human_or_explicit_connected_end_reason():

@@ -114,6 +114,18 @@ def _message_response(payload: dict[str, Any]) -> dict[str, Any]:
     return {"messageResponse": payload}
 
 
+def _tool_results_response(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return Vapi Function-tool results in their required top-level envelope.
+
+    ``messageResponse`` is used by server-message responses such as an
+    assistant-request error.  Function tool calls are different: Vapi reads
+    ``results`` directly from the HTTP response body and matches each item by
+    ``toolCallId``.  Nesting it in ``messageResponse`` makes Vapi treat every
+    tool call as having no result.
+    """
+    return {"results": results}
+
+
 def _assistant_response(call, settings):
     assistant_id = settings.vapi_assistant_id
     if not assistant_id:
@@ -297,12 +309,12 @@ async def vapi_webhook(
         if message_type == "tool-calls":
             if not call_id:
                 _log_event(logging.WARNING, "tool_calls_rejected", reason="missing_call_id")
-                return _message_response({"results": []})
+                return _tool_results_response([])
             try:
                 session = service.authenticated_call(call_id, _caller_number(call_data))
             except VapiAuthenticationError as exc:
                 _log_event(logging.WARNING, "tool_calls_rejected", call_id=log_call_id, reason=str(exc))
-                return _message_response({"results": []})
+                return _tool_results_response([])
             results = []
             for item in _tool_calls(message):
                 function = item.get("function") if isinstance(item.get("function"), dict) else {}
@@ -335,7 +347,7 @@ async def vapi_webhook(
                         "result": json.dumps(result, separators=(",", ":")),
                     }
                 )
-            return _message_response({"results": results})
+            return _tool_results_response(results)
 
         if message_type == "status-update":
             _log_event(
@@ -374,5 +386,5 @@ async def vapi_webhook(
         if message.get("type") == "assistant-request":
             return _assistant_error("Memoray could not verify this call.")
         if message.get("type") == "tool-calls":
-            return _message_response({"results": []})
+            return _tool_results_response([])
         return {}
