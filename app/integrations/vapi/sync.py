@@ -55,6 +55,7 @@ def sync_assistant(
     credential_id: str | None = None,
     voice_provider: str | None = None,
     voice_id: str | None = None,
+    voice_model: str | None = None,
 ) -> dict[str, Any]:
     """PATCH the configured assistant and return Vapi's response JSON."""
     endpoint = f"https://api.vapi.ai/assistant/{assistant_id}"
@@ -64,6 +65,7 @@ def sync_assistant(
             credential_id=credential_id,
             voice_provider=voice_provider,
             voice_id=voice_id,
+            voice_model=voice_model,
         )
     ).encode("utf-8")
     request = Request(
@@ -74,6 +76,9 @@ def sync_assistant(
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
+            # Vapi's Cloudflare edge rejects urllib's default Python client
+            # signature before the request reaches the Vapi API.
+            "User-Agent": "Memoray-Vapi-Sync/1.0",
         },
     )
     try:

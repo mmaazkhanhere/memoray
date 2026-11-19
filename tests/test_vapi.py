@@ -45,6 +45,10 @@ def test_vapi_assistant_configuration_is_dynamic_and_shared():
     assert "stopSpeakingPlan" not in configuration
     assert "Asia/Karachi" in prompt
     assert "2026-11-16T12:00:00+05:00" in prompt
+    assert "**Reminder retrieval:**" in prompt
+    assert "call `list_reminders` before answering" in prompt
+    assert "**Memory retrieval:**" in prompt
+    assert "call\n`retrieve_memories`" in prompt
     assert "call\n`create_reminder` immediately" in prompt
     assert "Never say that a reminder or memory was created" in prompt
     assert len(configuration["model"]["tools"]) == 10
@@ -133,9 +137,14 @@ def test_vapi_assistant_request_selects_saved_riley_assistant():
 
 
 def test_vapi_sync_uses_the_same_minimal_dynamic_assistant_fields():
-    payload = build_payload()
+    payload = build_payload(
+        voice_provider="11labs",
+        voice_id="voice-1",
+        voice_model="eleven_turbo_v2_5",
+    )
     assert "serverMessages" not in payload
     assert "stopSpeakingPlan" not in payload
+    assert payload["voice"]["model"] == "eleven_turbo_v2_5"
 
 
 def linked_user(db):

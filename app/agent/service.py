@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 import uuid
 from dataclasses import dataclass
@@ -30,6 +31,8 @@ from app.schemas import (
 )
 from app.time_utils import format_user_datetime, to_user_timezone
 from app.users.service import UserService
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are Memoray, a reminder and memory assistant. You create, list, reschedule, cancel, and snooze reminders, and save or retrieve durable user memories.
 
@@ -710,7 +713,27 @@ class ReminderAgent:
         except (ValueError, ValidationError):
             return {"operation": "not_retrieved", "error": "The reminder filter was invalid."}
         user = self.users.get(user_id)
+        database = self.reminders.db.get_bind().url.render_as_string(hide_password=True)
+        logger.info(
+            "reminder.list_query user_id=%s arguments=%s title=%r start=%s end=%s "
+            "occurrence_start=%s occurrence_end=%s status=%s database=%s",
+            user_id,
+            arguments,
+            query.title,
+            query.start,
+            query.end,
+            query.occurrence_start,
+            query.occurrence_end,
+            query.status,
+            database,
+        )
         reminders = self.reminders.list_with_occurrences(user_id, query)
+        logger.info(
+            "reminder.list_result user_id=%s count=%s database=%s",
+            user_id,
+            len(reminders),
+            database,
+        )
         formatted = []
         for item, occurrence in reminders:
             reminder_data = to_response(item, user.timezone, occurrence).model_dump(mode="json")

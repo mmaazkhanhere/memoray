@@ -360,6 +360,17 @@ async def vapi_webhook(
                 name = str(function.get("name") or "")
                 if not tool_call_id or not name:
                     continue
+                database = db.get_bind().url.render_as_string(hide_password=True)
+                _log_event(
+                    logging.INFO,
+                    "tool_authenticated",
+                    call_id=log_call_id,
+                    user_id=str(session.user_id),
+                    tool=name,
+                    tool_call_id=tool_call_id,
+                    arguments=function.get("arguments", {}),
+                    database=database,
+                )
                 try:
                     arguments = _parse_arguments(function.get("arguments", {}))
                     result = service.execute_tool(
