@@ -126,6 +126,42 @@ def _tool_results_response(results: list[dict[str, Any]]) -> dict[str, Any]:
     return {"results": results}
 
 
+def _tool_result(
+    *,
+    name: str,
+    tool_call_id: str,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Convert an application result into Vapi's per-tool success/error shape."""
+    if result.get("error") or result.get("operation") in {"failed", "rejected"}:
+        return {
+            "name": name,
+            "toolCallId": tool_call_id,
+            "error": str(result.get("error") or "Tool execution failed."),
+        }
+    return {
+        "name": name,
+        "toolCallId": tool_call_id,
+        "result": json.dumps(result, separators=(",", ":")),
+    }
+
+
+def _tool_call_errors(message: dict[str, Any], error: str) -> list[dict[str, Any]]:
+    """Create one Vapi error result for every tool call with an ID."""
+    results = []
+    for item in _tool_calls(message):
+        tool_call_id = str(item.get("id") or "")
+        if not tool_call_id:
+            continue
+        function = item.get("function") if isinstance(item.get("function"), dict) else {}
+        name = str(function.get("name") or "")
+        result = {"toolCallId": tool_call_id, "error": error}
+        if name:
+            result["name"] = name
+        results.append(result)
+    return results
+
+
 def _assistant_response(call, settings):
     assistant_id = settings.vapi_assistant_id
     if not assistant_id:
@@ -309,12 +345,14 @@ async def vapi_webhook(
         if message_type == "tool-calls":
             if not call_id:
                 _log_event(logging.WARNING, "tool_calls_rejected", reason="missing_call_id")
-                return _tool_results_response([])
+                return _tool_results_response(
+                    _tool_call_errors(message, "Vapi call ID is required.")
+                )
             try:
                 session = service.authenticated_call(call_id, _caller_number(call_data))
             except VapiAuthenticationError as exc:
                 _log_event(logging.WARNING, "tool_calls_rejected", call_id=log_call_id, reason=str(exc))
-                return _tool_results_response([])
+                return _tool_results_response(_tool_call_errors(message, str(exc)))
             results = []
             for item in _tool_calls(message):
                 function = item.get("function") if isinstance(item.get("function"), dict) else {}
@@ -331,7 +369,14 @@ async def vapi_webhook(
                         arguments=arguments,
                     )
                 except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
-                    result = {"operation": "failed", "error": str(exc)}
+                    results.append(
+                        {
+                            "name": name,
+                            "toolCallId": tool_call_id,
+                            "error": str(exc),
+                        }
+                    )
+                    continue
                 _log_event(
                     logging.INFO,
                     "tool_completed",
@@ -340,13 +385,7 @@ async def vapi_webhook(
                     tool_call_id=tool_call_id,
                     operation=result.get("operation"),
                 )
-                results.append(
-                    {
-                        "name": name,
-                        "toolCallId": tool_call_id,
-                        "result": json.dumps(result, separators=(",", ":")),
-                    }
-                )
+                results.append(_tool_result(name=name, tool_call_id=tool_call_id, result=result))
             return _tool_results_response(results)
 
         if message_type == "status-update":
@@ -386,5 +425,7 @@ async def vapi_webhook(
         if message.get("type") == "assistant-request":
             return _assistant_error("Memoray could not verify this call.")
         if message.get("type") == "tool-calls":
-            return _tool_results_response([])
+            return _tool_results_response(
+                _tool_call_errors(message, "The tool call could not be completed.")
+            )
         return {}

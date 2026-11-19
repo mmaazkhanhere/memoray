@@ -5,6 +5,8 @@ from app.integrations.vapi.router import (
     _assistant_error,
     _assistant_response,
     _message_response,
+    _tool_call_errors,
+    _tool_result,
     _tool_results_response,
     _urgent_outcome,
 )
@@ -53,6 +55,47 @@ def test_vapi_server_responses_use_the_correct_envelope_for_each_message_type():
     assert _tool_results_response(
         [{"toolCallId": "call-1", "result": '{"operation":"retrieved"}'}]
     ) == {"results": [{"toolCallId": "call-1", "result": '{"operation":"retrieved"}'}]}
+
+
+def test_vapi_tool_result_preserves_id_and_returns_per_tool_error():
+    assert _tool_result(
+        name="list_reminders",
+        tool_call_id="call-tool-1",
+        result={"operation": "retrieved", "count": 0, "reminders": []},
+    ) == {
+        "name": "list_reminders",
+        "toolCallId": "call-tool-1",
+        "result": '{"operation":"retrieved","count":0,"reminders":[]}',
+    }
+    assert _tool_result(
+        name="list_reminders",
+        tool_call_id="call-tool-2",
+        result={"operation": "failed", "error": "database unavailable"},
+    ) == {
+        "name": "list_reminders",
+        "toolCallId": "call-tool-2",
+        "error": "database unavailable",
+    }
+
+
+def test_vapi_auth_failure_returns_an_error_for_each_tool_call():
+    assert _tool_call_errors(
+        {
+            "toolCallList": [
+                {
+                    "id": "call-tool-3",
+                    "function": {"name": "list_reminders"},
+                }
+            ]
+        },
+        "This call is not active.",
+    ) == [
+        {
+            "toolCallId": "call-tool-3",
+            "error": "This call is not active.",
+            "name": "list_reminders",
+        }
+    ]
 
 
 def test_urgent_vapi_outcome_requires_a_human_or_explicit_connected_end_reason():
