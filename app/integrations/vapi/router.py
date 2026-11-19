@@ -88,6 +88,25 @@ def _log_event(level: int, event: str, **context: Any) -> None:
     logger.log(level, "vapi.%s %s", event, context)
 
 
+_DIAGNOSTIC_REDACTED_FIELDS = {"content", "query", "candidates", "transcript"}
+
+
+def _diagnostic_data(value: Any, *, field_name: str | None = None) -> Any:
+    """Keep phone diagnostics useful without writing memories or transcripts to logs."""
+    if field_name in _DIAGNOSTIC_REDACTED_FIELDS:
+        return "<redacted>"
+    if isinstance(value, dict):
+        return {
+            str(key): _diagnostic_data(item, field_name=str(key))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_diagnostic_data(item) for item in value]
+    if isinstance(value, str) and len(value) > 1_000:
+        return f"{value[:1_000]}… <truncated>"
+    return value
+
+
 def _call_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     message = payload.get("message") if isinstance(payload.get("message"), dict) else payload
     call = message.get("call") if isinstance(message.get("call"), dict) else payload.get("call")
@@ -195,6 +214,10 @@ def _assistant_response(call, settings):
         response_keys=sorted(response),
         assistant_id=assistant_id,
         user_timezone=timezone_name,
+        current_local_time=current_local_time.isoformat(),
+        model_override_includes_time=current_local_time.isoformat()
+        in model["messages"][0]["content"],
+        variable_values=response["assistantOverrides"]["variableValues"],
     )
     return response
 
@@ -365,7 +388,25 @@ async def vapi_webhook(
                 _log_event(logging.WARNING, "tool_calls_rejected", call_id=log_call_id, reason=str(exc))
                 return _tool_results_response(_tool_call_errors(message, str(exc)))
             results = []
-            for item in _tool_calls(message):
+            tool_calls = _tool_calls(message)
+            _log_event(
+                logging.INFO,
+                "tool_calls_received",
+                call_id=log_call_id,
+                count=len(tool_calls),
+                tools=[
+                    {
+                        "tool": (
+                            item.get("function", {}).get("name")
+                            if isinstance(item.get("function"), dict)
+                            else None
+                        ),
+                        "tool_call_id": item.get("id"),
+                    }
+                    for item in tool_calls
+                ],
+            )
+            for item in tool_calls:
                 function = item.get("function") if isinstance(item.get("function"), dict) else {}
                 tool_call_id = str(item.get("id") or "")
                 name = str(function.get("name") or "")
@@ -374,16 +415,24 @@ async def vapi_webhook(
                 database = db.get_bind().url.render_as_string(hide_password=True)
                 _log_event(
                     logging.INFO,
-                    "tool_authenticated",
+                    "tool_execution_started",
                     call_id=log_call_id,
                     user_id=str(session.user_id),
                     tool=name,
                     tool_call_id=tool_call_id,
-                    arguments=function.get("arguments", {}),
+                    raw_arguments=_diagnostic_data(function.get("arguments", {})),
                     database=database,
                 )
                 try:
                     arguments = _parse_arguments(function.get("arguments", {}))
+                    _log_event(
+                        logging.INFO,
+                        "tool_arguments_parsed",
+                        call_id=log_call_id,
+                        tool=name,
+                        tool_call_id=tool_call_id,
+                        arguments=_diagnostic_data(arguments),
+                    )
                     result = service.execute_tool(
                         session,
                         tool_call_id=tool_call_id,
@@ -391,6 +440,14 @@ async def vapi_webhook(
                         arguments=arguments,
                     )
                 except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+                    _log_event(
+                        logging.WARNING,
+                        "tool_execution_rejected",
+                        call_id=log_call_id,
+                        tool=name,
+                        tool_call_id=tool_call_id,
+                        error=str(exc),
+                    )
                     results.append(
                         {
                             "name": name,
@@ -406,8 +463,18 @@ async def vapi_webhook(
                     tool=name,
                     tool_call_id=tool_call_id,
                     operation=result.get("operation"),
+                    result=_diagnostic_data(result),
                 )
-                results.append(_tool_result(name=name, tool_call_id=tool_call_id, result=result))
+                vapi_result = _tool_result(name=name, tool_call_id=tool_call_id, result=result)
+                _log_event(
+                    logging.INFO,
+                    "tool_result_sent",
+                    call_id=log_call_id,
+                    tool=name,
+                    tool_call_id=tool_call_id,
+                    response=_diagnostic_data(vapi_result),
+                )
+                results.append(vapi_result)
             return _tool_results_response(results)
 
         if message_type == "status-update":

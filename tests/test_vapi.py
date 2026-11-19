@@ -4,6 +4,7 @@ from app.integrations.vapi.assistant import assistant_configuration, assistant_t
 from app.integrations.vapi.router import (
     _assistant_error,
     _assistant_response,
+    _diagnostic_data,
     _message_response,
     _tool_call_errors,
     _tool_result,
@@ -93,6 +94,22 @@ def test_vapi_server_responses_use_the_correct_envelope_for_each_message_type():
     assert _tool_results_response(
         [{"toolCallId": "call-1", "result": '{"operation":"retrieved"}'}]
     ) == {"results": [{"toolCallId": "call-1", "result": '{"operation":"retrieved"}'}]}
+
+
+def test_vapi_diagnostics_redact_memory_content_and_keep_reminder_schedule():
+    assert _diagnostic_data(
+        {
+            "title": "Call Ahmad",
+            "date": "2026-11-19",
+            "content": "private memory",
+            "candidates": [{"content": "another private memory"}],
+        }
+    ) == {
+        "title": "Call Ahmad",
+        "date": "2026-11-19",
+        "content": "<redacted>",
+        "candidates": "<redacted>",
+    }
 
 
 def test_vapi_tool_result_preserves_id_and_returns_per_tool_error():

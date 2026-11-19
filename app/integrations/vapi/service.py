@@ -137,7 +137,20 @@ class VapiCallService:
         arguments: dict[str, Any],
     ) -> dict[str, Any]:
         if call.status != VapiCallStatus.active:
+            logger.warning(
+                "vapi.tool_execution_rejected call_id=%s tool=%s tool_call_id=%s reason=inactive_call",
+                call.external_call_id,
+                name,
+                tool_call_id,
+            )
             return {"operation": "rejected", "error": "This call is no longer active."}
+        logger.info(
+            "vapi.tool_execution_entered call_id=%s user_id=%s tool=%s tool_call_id=%s",
+            call.external_call_id,
+            call.user_id,
+            name,
+            tool_call_id,
+        )
         arguments_hash = hashlib.sha256(
             json.dumps(arguments, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
@@ -149,12 +162,31 @@ class VapiCallService:
         )
         if existing is not None:
             if existing.arguments_hash != arguments_hash or existing.tool_name != name:
+                logger.warning(
+                    "vapi.tool_execution_rejected call_id=%s tool=%s tool_call_id=%s reason=reused_id",
+                    call.external_call_id,
+                    name,
+                    tool_call_id,
+                )
                 return {"operation": "rejected", "error": "This tool call ID was already used."}
             if existing.result.get("operation") == "processing":
+                logger.warning(
+                    "vapi.tool_execution_processing call_id=%s tool=%s tool_call_id=%s",
+                    call.external_call_id,
+                    name,
+                    tool_call_id,
+                )
                 return {
                     "operation": "failed",
                     "error": "The previous request is still completing; please retry once.",
                 }
+            logger.info(
+                "vapi.tool_execution_cache_hit call_id=%s tool=%s tool_call_id=%s operation=%s",
+                call.external_call_id,
+                name,
+                tool_call_id,
+                existing.result.get("operation"),
+            )
             return existing.result
 
         try:
@@ -194,6 +226,14 @@ class VapiCallService:
         else:
             result = self._run_shared_tool(call, name, arguments)
 
+        logger.info(
+            "vapi.tool_execution_finished call_id=%s tool=%s tool_call_id=%s operation=%s error=%r",
+            call.external_call_id,
+            name,
+            tool_call_id,
+            result.get("operation"),
+            result.get("error"),
+        )
         self._add_spoken_confirmation(result)
         if execution not in self.db:
             self.db.add(execution)
@@ -266,11 +306,25 @@ class VapiCallService:
                 "reschedule_reminder": "not_rescheduled",
                 "snooze_occurrence": "not_snoozed",
             }.get(name, "not_created")
-            return {
+            result = {
                 "operation": operation,
                 "error": "A linked Telegram account is required for call reminders.",
             }
+            logger.warning(
+                "vapi.shared_tool_rejected call_id=%s user_id=%s tool=%s reason=no_telegram_identity",
+                call.external_call_id,
+                call.user_id,
+                name,
+            )
+            return result
         try:
+            logger.info(
+                "vapi.shared_tool_dispatch call_id=%s user_id=%s tool=%s has_telegram_identity=%s",
+                call.external_call_id,
+                call.user_id,
+                name,
+                identity is not None,
+            )
             agent = create_tool_agent(self.db, notification_identity=identity)
             from app.llm.protocol import ToolCall
 
