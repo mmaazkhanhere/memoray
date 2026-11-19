@@ -8,7 +8,7 @@ import pytest
 from app.config import Settings
 from app.mcp.auth.service import McpAuthService, OAuthError
 from app.mcp.tools import execute
-from app.models import ChannelIdentity, ChannelIdentityStatus, ChannelKind
+from app.models import ChannelIdentity, ChannelIdentityStatus, ChannelKind, PhoneLink
 from app.schemas import UserCreate
 from app.users.service import UserService
 
@@ -96,3 +96,38 @@ def test_mcp_reminder_creation_uses_linked_telegram_destination(db):
     )
     assert result["operation"] == "created"
     assert result["reminder"]["destination_id"]
+
+
+def test_mcp_reminder_creation_persists_urgent_flag(db):
+    user = UserService(db).create(UserCreate(name="Ada", timezone="UTC"))
+    db.add(PhoneLink(user_id=user.id, e164_number="+14155550123", is_active=True))
+    db.add(
+        ChannelIdentity(
+            user_id=user.id,
+            channel=ChannelKind.telegram,
+            external_principal_id="telegram-urgent-user",
+            external_destination_id="telegram-urgent-chat",
+            status=ChannelIdentityStatus.linked,
+            is_default=True,
+        )
+    )
+    db.commit()
+    identity = type(
+        "Identity",
+        (),
+        {
+            "user_id": user.id,
+            "client_id": "client-1",
+            "scope": frozenset({"memoray:reminders.write"}),
+            "require": lambda self, scope: None,
+        },
+    )()
+    date = (datetime.now(timezone.utc) + timedelta(days=1)).date().isoformat()
+    result = execute(
+        "create_reminder",
+        {"title": "Call Ahmad", "date": date, "time": "10:00", "urgent": True},
+        identity,
+        db,
+    )
+    assert result["operation"] == "created"
+    assert result["reminder"]["is_urgent"] is True

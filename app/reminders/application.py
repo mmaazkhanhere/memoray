@@ -76,6 +76,7 @@ class ReminderApplication:
         schedule_time: time,
         recurrence_frequency=None,
         recurrence_interval: int = 1,
+        is_urgent: bool = False,
     ) -> dict:
         reminder = self.reminders.create_from_local_parts(
             user_id,
@@ -84,6 +85,7 @@ class ReminderApplication:
             schedule_time=schedule_time,
             recurrence_frequency=recurrence_frequency,
             recurrence_interval=recurrence_interval,
+            is_urgent=is_urgent,
             notification_identity=self._delivery_identity(user_id),
         )
         user = self.users.get(user_id)

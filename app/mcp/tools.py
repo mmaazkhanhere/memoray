@@ -52,6 +52,7 @@ TOOLS = [
             "recurring": {"type": "boolean", "default": False},
             "recurrence_frequency": {"type": ["string", "null"], "enum": ["daily", "weekly", "monthly", "yearly", None]},
             "recurrence_interval": {"type": "integer", "minimum": 1, "default": 1},
+            "urgent": {"type": "boolean", "default": False, "description": "Use urgent phone-call escalation when explicitly requested."},
             "idempotency_key": {"type": ["string", "null"]},
         }},
         "_meta": {"securitySchemes": [_auth("memoray:reminders.write")]},
@@ -69,6 +70,7 @@ TOOLS = [
                     "recurring": {"type": "boolean", "default": False},
                     "recurrence_frequency": {"type": ["string", "null"], "enum": ["daily", "weekly", "monthly", "yearly", None]},
                     "recurrence_interval": {"type": "integer", "minimum": 1, "default": 1},
+                    "urgent": {"type": "boolean", "default": False, "description": "Use urgent phone-call escalation when explicitly requested."},
                 },
             }},
             "idempotency_key": {"type": ["string", "null"]},
@@ -205,6 +207,7 @@ def execute(name: str, args: dict[str, Any], identity: McpIdentity, db: Session)
                 schedule_time=time.fromisoformat(args["time"]),
                 recurrence_frequency=frequency,
                 recurrence_interval=int(args.get("recurrence_interval", 1)),
+                is_urgent=bool(args.get("urgent", False)),
             )
             return {"operation": "created", "reminder": reminder}
         if name == "create_reminders":
@@ -221,6 +224,7 @@ def execute(name: str, args: dict[str, Any], identity: McpIdentity, db: Session)
                         schedule_time=time.fromisoformat(item["time"]),
                         recurrence_frequency=frequency,
                         recurrence_interval=int(item.get("recurrence_interval", 1)),
+                        is_urgent=bool(item.get("urgent", False)),
                     ))
                 except (KeyError, TypeError, ValueError, LookupError) as exc:
                     rejected.append({"title": item.get("title"), "error": str(exc)})
