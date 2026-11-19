@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from app.integrations.vapi.assistant import assistant_configuration
+from app.integrations.vapi.assistant import assistant_configuration, assistant_tool_definitions
 from app.integrations.vapi.router import (
     _assistant_error,
     _assistant_response,
@@ -45,13 +45,46 @@ def test_vapi_assistant_configuration_is_dynamic_and_shared():
     assert "stopSpeakingPlan" not in configuration
     assert "Asia/Karachi" in prompt
     assert "2026-11-16T12:00:00+05:00" in prompt
-    assert "**Reminder retrieval:**" in prompt
-    assert "call `list_reminders` before answering" in prompt
-    assert "**Memory retrieval:**" in prompt
-    assert "call\n`retrieve_memories`" in prompt
-    assert "call\n`create_reminder` immediately" in prompt
-    assert "Never say that a reminder or memory was created" in prompt
+    assert "Caller timezone: Asia/Karachi." in prompt
+    assert "Current local time: 2026-11-16T12:00:00+05:00." in prompt
+    for tool_name in (
+        "update_reminder_draft",
+        "create_reminder",
+        "create_reminders",
+        "list_reminders",
+        "reschedule_reminder",
+        "cancel_reminder",
+        "snooze_occurrence",
+        "complete_delivered_occurrence",
+        "create_memory",
+        "retrieve_memories",
+    ):
+        assert f"`{tool_name}`" in prompt
     assert len(configuration["model"]["tools"]) == 10
+
+
+def test_vapi_tool_schemas_use_vapis_supported_optional_field_representation():
+    def has_any_of(value):
+        if isinstance(value, dict):
+            return "anyOf" in value or any(has_any_of(item) for item in value.values())
+        if isinstance(value, list):
+            return any(has_any_of(item) for item in value)
+        return False
+
+    tools = assistant_tool_definitions()
+    assert [item["function"]["name"] for item in tools] == [
+        "update_reminder_draft",
+        "create_reminder",
+        "create_reminders",
+        "list_reminders",
+        "reschedule_reminder",
+        "cancel_reminder",
+        "snooze_occurrence",
+        "complete_delivered_occurrence",
+        "create_memory",
+        "retrieve_memories",
+    ]
+    assert not has_any_of(tools)
 
 
 def test_vapi_server_responses_use_the_correct_envelope_for_each_message_type():
@@ -134,6 +167,9 @@ def test_vapi_assistant_request_selects_saved_riley_assistant():
     assert variables["user_name"] == "Caller"
     assert variables["user_timezone"] == "Asia/Karachi"
     assert variables["current_local_time"].endswith("+05:00")
+    prompt = response["assistantOverrides"]["model"]["messages"][0]["content"]
+    assert "Caller timezone: Asia/Karachi." in prompt
+    assert variables["current_local_time"] in prompt
 
 
 def test_vapi_sync_uses_the_same_minimal_dynamic_assistant_fields():

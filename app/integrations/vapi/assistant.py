@@ -6,7 +6,7 @@ from typing import Any
 from app.agent.tools import TOOLS
 
 
-VAPI_SYSTEM_PROMPT = """You are Memoray on a phone call. Help the authenticated caller with
+_LEGACY_VAPI_SYSTEM_PROMPT = """You are Memoray on a phone call. Help the authenticated caller with
 reminders
 and durable memories.
 
@@ -16,10 +16,14 @@ Use the provided tools for every reminder or memory operation. Never invent remi
 times,
 statuses, or memory facts.
 **Reminder retrieval:** When the caller asks what reminders they have, whether anything is due,
-or asks about reminders for a date or time range, call `list_reminders` before answering. Use the
-caller’s local timezone. For “today,” pass that local calendar date as both `start` and `end`;
-for a named reminder, include a distinctive `title` fragment. State only reminders returned by
-the tool, and clearly say when none match.
+or asks about reminders for a date or time range, call `list_reminders` before answering.
+Use the caller's local timezone. Tool arguments must contain literal values only. Never send
+`{{...}}`, Python, JavaScript, function calls, or expressions as tool arguments.
+For “today,” copy the first 10 characters of the current local time above and send that literal
+`YYYY-MM-DD` value as both `start` and `end`. For example, if the current local time is
+`2026-11-19T11:53:53+05:00`, send `{"start":"2026-11-19","end":"2026-11-19"}`.
+For a named reminder, include a literal distinctive `title` fragment. State only reminders returned
+by the tool, and clearly say when none match.
 **Memory retrieval:** When the caller asks about a fact they asked Memoray to remember, call
 `retrieve_memories` with a concise query before answering. Use only facts from the returned
 candidates; if none are returned, say that you do not have that memory.
@@ -45,9 +49,73 @@ The caller may interrupt you; stop and listen, then process the new utterance as
 """
 
 
+VAPI_SYSTEM_PROMPT = """You are Memoray, a phone assistant for reminders and durable memories.
+Caller timezone: {{user_timezone}}. Current local time: {{current_local_time}}. Interpret relative
+dates and times in that timezone. Tool arguments must be literal values, never templates or code.
+
+Use tools for every reminder or memory operation. Never invent IDs, schedules, statuses, or facts.
+
+Tools:
+- `update_reminder_draft`: save partial reminder details when title, date, or time is missing.
+- `create_reminder`: create one confirmed reminder only with title, date, and time; recurring ones
+  also need frequency. Set urgent only when explicitly requested.
+- `create_reminders`: create two or more complete reminder requests in one turn.
+- `list_reminders`: call before answering about reminders, due items, or a date range; also call to
+  identify a target before rescheduling or canceling. For "today", use the YYYY-MM-DD date from the
+  current local time for both `start` and `end`. Use a distinctive title when one is named.
+- `reschedule_reminder`: requires the exact listed `reminder_id`, a future schedule, and scope.
+  Use `series` for a non-recurring reminder or the whole series; use `occurrence` with its exact
+  `occurrence_id` for one recurring instance.
+- `cancel_reminder`: requires the exact listed `reminder_id` and scope: `one_time` for a
+  non-recurring reminder, `occurrence` with its exact occurrence ID for one instance, or `series`
+  only when the caller requests the whole series.
+- `snooze_occurrence`: use only for one delivered reminder occurrence; provide a positive duration
+  and the exact occurrence/reminder target, or an unambiguous title.
+- `complete_delivered_occurrence`: mark one already delivered occurrence done; use its title or ID
+  when known. Clarify if more than one could match.
+- `create_memory`: save a clear fact only when the caller explicitly asks you to remember it.
+- `retrieve_memories`: call before answering a question about a remembered fact; use only returned
+  candidates.
+
+If discovery returns multiple reminders, narrow it by title and never mutate an ambiguous target.
+Do not claim a change succeeded until the tool returns success. If a result has `speak`, say it
+exactly; otherwise give a brief natural spoken reply. Normal reminders notify linked Telegram;
+urgent reminders call the linked phone and then fall back to Telegram. If interrupted, stop and
+handle the newest request.
+"""
+
+
 def assistant_tool_definitions() -> list[dict[str, Any]]:
-    """Return independent copies of the OpenAI-compatible function schemas."""
-    return deepcopy(TOOLS)
+    """Return the shared tools in the JSON Schema subset accepted by Vapi.
+
+    The canonical agent schemas use ``anyOf`` to make fields nullable.  Vapi's
+    function schema validator rejects that construct, although its optional
+    properties already communicate the same intent: omit a value that is not
+    known.  Keep the functions and accepted non-null argument shapes identical
+    to every other channel while removing only that Vapi-incompatible null
+    representation.
+    """
+    return [_vapi_schema(tool) for tool in deepcopy(TOOLS)]
+
+
+def _vapi_schema(value: Any) -> Any:
+    """Recursively reduce nullable ``anyOf`` schemas to their useful branch."""
+    if isinstance(value, list):
+        return [_vapi_schema(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+
+    options = value.get("anyOf")
+    if isinstance(options, list):
+        non_null = [item for item in options if not (isinstance(item, dict) and item.get("type") == "null")]
+        if len(non_null) == 1:
+            return _vapi_schema(non_null[0])
+        # ``start`` and ``end`` accept either a date or date-time.  Both are
+        # strings to the tool executor, so a plain string preserves that API.
+        if non_null and all(isinstance(item, dict) and item.get("type") == "string" for item in non_null):
+            return {"type": "string"}
+
+    return {key: _vapi_schema(item) for key, item in value.items()}
 
 
 def assistant_configuration(

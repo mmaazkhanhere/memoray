@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db
+from app.integrations.vapi.assistant import assistant_configuration
 from app.integrations.vapi.service import VapiAuthenticationError, VapiCallService
 from app.urgent_reminders.service import UrgentReminderService
 from app.time_utils import to_user_timezone
@@ -168,9 +169,19 @@ def _assistant_response(call, settings):
         raise ValueError("VAPI_ASSISTANT_ID is not configured")
     timezone_name = call.user.timezone or "UTC"
     current_local_time = to_user_timezone(datetime.now(timezone.utc), timezone_name)
+    # Render time-sensitive context on our server.  Vapi variable substitution
+    # is retained below for other assistant fields, but a rendered system
+    # message prevents the model from falling back to stale training-time dates
+    # if a provider does not expand a prompt variable for an inbound call.
+    model = assistant_configuration(
+        user_name=call.user.name,
+        user_timezone=timezone_name,
+        current_local_time=current_local_time.isoformat(),
+    )["model"]
     response = {
         "assistantId": assistant_id,
         "assistantOverrides": {
+            "model": model,
             "variableValues": {
                 "user_name": call.user.name or "there",
                 "user_timezone": timezone_name,
